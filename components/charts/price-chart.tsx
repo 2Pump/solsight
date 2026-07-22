@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { createChart, ColorType, CandlestickSeries, type IChartApi } from "lightweight-charts";
+import { createChart, ColorType, type IChartApi } from "lightweight-charts";
 import type { Candle } from "@/lib/market-data";
 
 interface KeyLevel {
@@ -35,7 +35,7 @@ export function PriceChart({ candles, keyLevels = [] }: { candles: Candle[]; key
       autoSize: true,
     });
 
-    const series = chart.addSeries(CandlestickSeries, {
+    const series = chart.addCandlestickSeries({
       upColor: "#00E5C7",
       downColor: "#FF5C7A",
       borderVisible: false,
