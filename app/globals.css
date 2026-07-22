@@ -1,0 +1,130 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+    --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    color-scheme: dark;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    @apply bg-void text-ink font-sans antialiased;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  }
+
+  ::selection {
+    background: rgba(124, 92, 255, 0.35);
+    color: #fff;
+  }
+
+  /* thin, quiet scrollbar that matches the theme */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: rgba(124, 92, 255, 0.25);
+    border-radius: 999px;
+    border: 2px solid transparent;
+    background-clip: padding-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: rgba(124, 92, 255, 0.4);
+    background-clip: padding-box;
+  }
+
+  :focus-visible {
+    outline: 2px solid #7c5cff;
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  /* Glass panel used across cards, nav, and modals */
+  .glass {
+    @apply relative rounded-2xl border border-border bg-surface/70 backdrop-blur-xl;
+  }
+
+  .glass-hover {
+    @apply transition-colors duration-300 hover:border-border-strong hover:bg-surface-2/70;
+  }
+
+  /* Soft ambient glow behind hero / feature elements */
+  .glow-violet {
+    box-shadow: 0 0 0 1px rgba(124, 92, 255, 0.12), 0 20px 60px -20px rgba(124, 92, 255, 0.35);
+  }
+
+  .glow-teal {
+    box-shadow: 0 0 0 1px rgba(0, 229, 199, 0.12), 0 20px 60px -20px rgba(0, 229, 199, 0.3);
+  }
+
+  .text-gradient {
+    background: linear-gradient(120deg, #f3f2f8 20%, #a48cff 55%, #00e5c7 90%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* Faint animated grid used in hero / empty states */
+  .bg-signal-grid {
+    background-image:
+      linear-gradient(rgba(124, 92, 255, 0.06) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(124, 92, 255, 0.06) 1px, transparent 1px);
+    background-size: 42px 42px;
+    mask-image: radial-gradient(ellipse 80% 60% at 50% 0%, black 40%, transparent 90%);
+  }
+
+  .badge {
+    @apply inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium;
+  }
+
+  .badge-risk-low {
+    @apply badge border-pulse/25 bg-pulse/10 text-pulse;
+  }
+  .badge-risk-medium {
+    @apply badge border-amber/25 bg-amber/10 text-amber;
+  }
+  .badge-risk-high {
+    @apply badge border-risk/25 bg-risk/10 text-risk;
+  }
+  .badge-risk-extreme {
+    @apply badge border-risk/40 bg-risk/20 text-risk;
+  }
+
+  .shimmer {
+    background: linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0.03) 25%,
+      rgba(255, 255, 255, 0.08) 37%,
+      rgba(255, 255, 255, 0.03) 63%
+    );
+    background-size: 400% 100%;
+    @apply animate-shimmer;
+  }
+}
