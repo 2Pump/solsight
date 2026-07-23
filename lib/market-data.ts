@@ -9,6 +9,44 @@ const BIRDEYE_BASE = "https://public-api.birdeye.so";
 const DEXSCREENER_BASE = process.env.DEXSCREENER_BASE_URL ?? "https://api.dexscreener.com";
 
 /**
+ * Mint addresses for established, non-memecoin assets (native SOL, major
+ * stablecoins, bridged blue-chips, top liquid-staking tokens). SolSight's
+ * discovery feed is specifically for memecoin signal intelligence — running
+ * these through the same heuristic rug score that's tuned for microcap
+ * memecoins produces nonsense results (e.g. WETH getting flagged EXTREME
+ * risk because "LP lock status unknown" is scored as if it were a red flag,
+ * which it isn't for an asset like this). Denylisted, not analyzed at all.
+ *
+ * This is a best-effort, manually maintained list — not exhaustive. It
+ * catches the common cases seen in Birdeye's trending list; it does not
+ * and cannot solve token impersonation (e.g. a scam token cloning a real
+ * project's name/symbol with a different mint address) — that needs actual
+ * registry verification, which isn't built here.
+ */
+const BLUE_CHIP_MINTS = new Set([
+  "So11111111111111111111111111111111111111112", // Wrapped SOL
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
+  "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
+  "7vfCXTUXx5WJV5JADk17DUJ4ksgau7utNKj4b963voxs", // Wrapped Ether (Wormhole)
+  "3NZ9JMVBmGAqocybic2c7LQCJScmgsAZ6vQqTDzcqmJh", // Wrapped BTC (Sollet)
+  "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So", // mSOL (Marinade)
+  "J1toso1uCk3RLmjorhTtrVwY9HJ7X8V9yYac6Y7kGCPn", // JitoSOL
+  "7dHbWXmci3dT8UFYWYZweBLXgycu7Y3iL6trKn1Y7ARj", // stSOL (Lido)
+  "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN", // JUP
+]);
+
+/** Above this real market cap, a token is treated as a large-cap/blue-chip and skipped from memecoin discovery, even if not on the explicit denylist above. */
+const MEMECOIN_MARKET_CAP_CEILING_USD = 50_000_000;
+
+export function isBlueChipMint(mintAddress: string): boolean {
+  return BLUE_CHIP_MINTS.has(mintAddress);
+}
+
+export function isAboveMemecoinMarketCapCeiling(marketCapUsd: number | null): boolean {
+  return marketCapUsd !== null && marketCapUsd > MEMECOIN_MARKET_CAP_CEILING_USD;
+}
+
+/**
  * Birdeye's free/dev tier rate limit is tight enough that a burst of
  * requests (multiple page loads, dev hot-reloads, several users hitting the
  * same 30s revalidate window) can trigger a 429. Previously that surfaced
@@ -257,16 +295,18 @@ export async function getTrendingTokens(limit = 20): Promise<TrendingToken[]> {
   const json = await res.json();
   const tokens: Array<Record<string, unknown>> = json.data?.tokens ?? [];
 
-  return tokens.map((t, i) => ({
-    mintAddress: String(t.address),
-    symbol: String(t.symbol ?? "UNKNOWN"),
-    name: String(t.name ?? t.symbol ?? "Unknown token"),
-    imageUrl: (t.logoURI as string | undefined) ?? null,
-    priceUsd: typeof t.price === "number" ? t.price : null,
-    liquidityUsd: typeof t.liquidity === "number" ? t.liquidity : null,
-    volume24hUsd: typeof t.volume24hUSD === "number" ? t.volume24hUSD : null,
-    rank: i + 1,
-  }));
+  return tokens
+    .filter((t) => !isBlueChipMint(String(t.address)))
+    .map((t, i) => ({
+      mintAddress: String(t.address),
+      symbol: String(t.symbol ?? "UNKNOWN"),
+      name: String(t.name ?? t.symbol ?? "Unknown token"),
+      imageUrl: (t.logoURI as string | undefined) ?? null,
+      priceUsd: typeof t.price === "number" ? t.price : null,
+      liquidityUsd: typeof t.liquidity === "number" ? t.liquidity : null,
+      volume24hUsd: typeof t.volume24hUSD === "number" ? t.volume24hUSD : null,
+      rank: i + 1,
+    }));
 }
 
 /**

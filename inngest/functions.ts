@@ -1,6 +1,6 @@
 import { inngest } from "@/lib/inngest";
 import { prisma } from "@/lib/prisma";
-import { getTokenOverview, getTrendingTokens, heuristicRugScore } from "@/lib/market-data";
+import { getTokenOverview, getTrendingTokens, heuristicRugScore, isAboveMemecoinMarketCapCeiling } from "@/lib/market-data";
 import { getMintSafety } from "@/lib/helius";
 
 /**
@@ -98,6 +98,19 @@ export const discoverTrendingTokens = inngest.createFunction(
           getMintSafety(t.mintAddress),
         ]);
 
+        // The explicit blue-chip denylist (see lib/market-data.ts) catches
+        // known majors up front, but Birdeye's trending list can also
+        // surface large-caps we haven't denylisted by mint address. Now
+        // that we have a real market cap from the overview fetch, skip
+        // anything too large to be a memecoin-signal candidate — running
+        // it through the memecoin-tuned rug heuristic produces nonsense
+        // (a large, liquid, well-established token can score EXTREME risk
+        // purely because "LP lock status unknown" is scored as a red flag,
+        // which it isn't at that scale).
+        if (overview && isAboveMemecoinMarketCapCeiling(overview.marketCapUsd)) {
+          return { token: null, isNew: false, rugScore: null, skippedAsBlueChip: true };
+        }
+
         const rugScore = overview
           ? heuristicRugScore({
               liquidityUsd: overview.liquidityUsd,
@@ -129,9 +142,11 @@ export const discoverTrendingTokens = inngest.createFunction(
           create: { mintAddress: t.mintAddress, ...tokenData },
         });
 
-        return { token, isNew: !existing, rugScore };
-      })) as { token: { id: string }; isNew: boolean; rugScore: number | null };
+        return { token, isNew: !existing, rugScore, skippedAsBlueChip: false };
+      })) as { token: { id: string } | null; isNew: boolean; rugScore: number | null; skippedAsBlueChip: boolean };
 
+      if (result.skippedAsBlueChip || !result.token) continue;
+      const tokenId = result.token.id;
       if (result.isNew) discovered++;
 
       if (result.isNew) {
@@ -142,7 +157,7 @@ export const discoverTrendingTokens = inngest.createFunction(
 
           await prisma.signal.create({
             data: {
-              tokenId: result.token.id,
+              tokenId,
               type: "NEW_LISTING",
               headline: `${t.symbol} entered the top trending tokens by 24h volume`,
               reasoning:
