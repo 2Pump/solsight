@@ -35,20 +35,30 @@ const BLUE_CHIP_MINTS = new Set([
   "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN", // JUP
 ]);
 
-/** Above this real market cap, a token is treated as a large-cap/blue-chip and skipped from memecoin discovery, even if not on the explicit denylist above. */
-const MEMECOIN_MARKET_CAP_CEILING_USD = 50_000_000;
+/**
+ * Above this real market cap, a token is treated as too large for the kind
+ * of discovery this feed is for and skipped, even if not on the explicit
+ * denylist above. Deliberately tuned low (not just "exclude obvious
+ * blue-chips") — the product goal is surfacing tokens with real 2-5x+
+ * upside potential, which shrinks fast as market cap grows: a $500K-cap
+ * token doubling needs a fraction of the buying pressure a $50M-cap token
+ * would need for the same move. Smaller caps cut both ways (more downside
+ * risk too, including to zero) — this ceiling is a discovery filter for
+ * upside potential, not a safety guarantee, and pairs with the rug screener
+ * for risk assessment on top of it.
+ */
+const MEMECOIN_MARKET_CAP_CEILING_USD = 15_000_000;
 
 /**
  * Fallback ceiling on liquidity alone, used only when market cap comes back
- * null. A real memecoin virtually never has this much liquidity — tokens
- * this deep are established, regardless of whether Birdeye reported a
- * market cap for them. This exists specifically because "market cap
- * unknown" was previously treated as "assume it's fine," which is how
- * WETH and ZEC both slipped through discovery despite genuinely being
- * large-cap assets — better to skip a token on ambiguous data here than
- * mis-score it with the memecoin-tuned rug heuristic.
+ * null. Kept in the same spirit as the market cap ceiling above — deep
+ * liquidity is itself a sign a token has already grown past the
+ * high-upside-potential window this feed targets, regardless of whether
+ * Birdeye reported a market cap for it. This also catches WETH/ZEC-style
+ * large-caps that previously slipped through when market cap came back
+ * unknown and was wrongly treated as "assume it's fine."
  */
-const MEMECOIN_LIQUIDITY_FALLBACK_CEILING_USD = 2_000_000;
+const MEMECOIN_LIQUIDITY_FALLBACK_CEILING_USD = 200_000;
 
 export function isBlueChipMint(mintAddress: string): boolean {
   return BLUE_CHIP_MINTS.has(mintAddress);
