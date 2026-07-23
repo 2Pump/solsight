@@ -1,6 +1,6 @@
 import { WalletNetwork, type WalletNode, type WalletEdge } from "@/components/charts/wallet-network";
 import { WalletSearchBar } from "@/components/dashboard/wallet-search-bar";
-import { shortenAddress } from "@/lib/utils";
+import { shortenAddress, formatUsd, formatSymbol } from "@/lib/utils";
 import { getWalletFundFlow, getWalletBalances } from "@/lib/helius";
 import { ExternalLink, AlertTriangle } from "lucide-react";
 import Link from "next/link";
@@ -104,16 +104,38 @@ export default async function WalletDetailPage({
               {balances ? (
                 <>
                   <div className="mt-2 font-mono text-2xl font-semibold text-ink">
-                    {balances.solBalance.toFixed(2)} SOL
+                    {balances.totalUsdValue !== null
+                      ? formatUsd(balances.totalUsdValue)
+                      : `${balances.solBalance.toFixed(2)} SOL`}
                   </div>
                   <p className="mt-1 text-xs text-ink-faint">
-                    Plus {balances.tokenCount} other token{balances.tokenCount === 1 ? "" : "s"} held
+                    {balances.solBalance.toFixed(2)} SOL
+                    {balances.solUsdValue !== null && ` (${formatUsd(balances.solUsdValue)})`}
+                    {balances.tokenCount > 0 &&
+                      ` · plus ${balances.tokenCount} other token${balances.tokenCount === 1 ? "" : "s"}`}
                   </p>
+                  {balances.topHoldings.length > 0 && (
+                    <div className="mt-3 divide-y divide-border border-t border-border">
+                      {balances.topHoldings.map((h) => (
+                        <div
+                          key={h.mint}
+                          className="flex items-center justify-between py-2 text-sm"
+                        >
+                          <span className="font-mono text-ink-muted">
+                            {h.symbol ? formatSymbol(h.symbol) : shortenAddress(h.mint)}
+                          </span>
+                          <span className="font-mono text-xs text-ink-faint">
+                            {h.usdValue !== null ? formatUsd(h.usdValue) : h.amount.toLocaleString()}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </>
               ) : (
                 <p className="mt-2 text-sm text-ink-faint">
                   {process.env.HELIUS_API_KEY
-                    ? "Balance data unavailable."
+                    ? "Balance data unavailable — the wallet balances lookup failed for this address."
                     : "Set HELIUS_API_KEY to show wallet holdings."}
                 </p>
               )}

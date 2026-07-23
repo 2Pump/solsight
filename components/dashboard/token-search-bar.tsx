@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Input } from "@/components/ui/input";
 import { Search, Loader2 } from "lucide-react";
-import { formatUsd } from "@/lib/utils";
+import { formatUsd, formatSymbol } from "@/lib/utils";
 import type { TokenSearchResult } from "@/lib/market-data";
 
 // A raw mint address pasted directly skips the search-and-pick step and
@@ -95,7 +95,7 @@ export function TokenSearchBar() {
               className="flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition-colors hover:bg-white/5"
             >
               <div className="min-w-0">
-                <span className="font-mono font-medium text-ink">${r.symbol}</span>
+                <span className="font-mono font-medium text-ink">{formatSymbol(r.symbol)}</span>
                 <span className="ml-2 truncate text-xs text-ink-faint">{r.name}</span>
               </div>
               <span className="shrink-0 font-mono text-xs text-ink-muted">

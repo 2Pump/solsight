@@ -1,5 +1,7 @@
 import { SignalCard, type SignalCardData } from "@/components/dashboard/signal-card";
 import { prisma } from "@/lib/prisma";
+import { formatSymbol } from "@/lib/utils";
+import type { Prisma } from "@prisma/client";
 import { Radar } from "lucide-react";
 
 export const metadata = { title: "Live Signal Feed" };
@@ -8,6 +10,10 @@ export const metadata = { title: "Live Signal Feed" };
 // `revalidate = 0` keeps this feed live rather than statically cached,
 // since new signals can land at any time.
 export const revalidate = 0;
+
+type SignalWithTokenAndVotes = Prisma.SignalGetPayload<{
+  include: { token: { select: { symbol: true; mintAddress: true } }; votes: { select: { value: true } } };
+}>;
 
 async function getSignals(): Promise<SignalCardData[]> {
   const signals = await prisma.signal.findMany({
@@ -19,9 +25,9 @@ async function getSignals(): Promise<SignalCardData[]> {
     },
   });
 
-  return signals.map((s) => ({
+  return signals.map((s: SignalWithTokenAndVotes) => ({
     id: s.id,
-    tokenSymbol: `$${s.token.symbol}`,
+    tokenSymbol: formatSymbol(s.token.symbol),
     tokenMint: s.token.mintAddress,
     type: s.type,
     headline: s.headline,
@@ -29,7 +35,7 @@ async function getSignals(): Promise<SignalCardData[]> {
     qualityScore: s.qualityScore,
     riskLevel: s.riskLevel,
     createdAt: s.createdAt.toISOString(),
-    votes: s.votes.reduce((sum, v) => sum + v.value, 0),
+    votes: s.votes.reduce((sum: number, v: { value: number }) => sum + v.value, 0),
   }));
 }
 
@@ -51,8 +57,10 @@ export default async function FeedPage() {
           <div className="glass flex flex-col items-center gap-3 py-16 text-center">
             <Radar className="h-8 w-8 text-ink-faint" />
             <p className="text-sm text-ink-muted">
-              No signals yet. Run <code className="text-signal-soft">npm run db:seed</code> to add
-              sample data, or wait for the background job to generate real ones.
+              No signals yet. The trending-token discovery job runs every 30 minutes and creates a
+              signal for each new token it finds — check back shortly, or run{" "}
+              <code className="text-signal-soft">npm run db:seed</code> for sample data in the
+              meantime.
             </p>
           </div>
         ) : (

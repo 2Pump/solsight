@@ -42,3 +42,15 @@ export function riskLevelFromScore(score: number): "LOW" | "MEDIUM" | "HIGH" | "
   if (score < 75) return "HIGH";
   return "EXTREME";
 }
+
+/**
+ * Strip any leading "$" from a token symbol before display. Some providers
+ * (and some on-chain token metadata) already include the $ in the symbol
+ * string itself — rendering `$${symbol}` on top of that produced the
+ * "$$WIF" display bug. Every place a symbol is shown should route through
+ * this so the $ is added exactly once, regardless of what the source data
+ * looks like.
+ */
+export function formatSymbol(symbol: string): string {
+  return `$${symbol.replace(/^\$+/, "")}`;
+}

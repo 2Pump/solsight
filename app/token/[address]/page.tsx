@@ -1,11 +1,12 @@
 import { PriceChart } from "@/components/charts/price-chart";
 import { AiAnalysisPanel } from "@/components/dashboard/ai-analysis-panel";
 import { RiskPanel } from "@/components/dashboard/risk-panel";
-import { Button } from "@/components/ui/button";
-import { formatCompact, formatUsd, formatPct, shortenAddress } from "@/lib/utils";
-import { Star, ExternalLink, AlertTriangle } from "lucide-react";
+import { AddToWatchlistButton } from "@/components/dashboard/add-to-watchlist-button";
+import { formatCompact, formatUsd, formatPct, formatSymbol, shortenAddress } from "@/lib/utils";
+import { ExternalLink, AlertTriangle } from "lucide-react";
 import Link from "next/link";
 import { getTokenOverview, getCandles, heuristicRugScore } from "@/lib/market-data";
+import { getMintSafety } from "@/lib/helius";
 import { analyzeChart } from "@/lib/anthropic";
 
 export const revalidate = 30; // refresh market data at most every 30s
@@ -20,22 +21,24 @@ export default async function TokenDetailPage({
   // Real market data — falls back from Birdeye to Dexscreener automatically
   // (see lib/market-data.ts). Returns null if the token can't be found on
   // either provider.
-  const overview = await getTokenOverview(address);
-  const candles = await getCandles(address, "15m");
+  const [overview, candles, mintSafety] = await Promise.all([
+    getTokenOverview(address),
+    getCandles(address, "15m"),
+    getMintSafety(address),
+  ]);
   const hasChartHistory = candles.length >= 10;
   const lastPrice = hasChartHistory ? candles[candles.length - 1].close : (overview?.priceUsd ?? null);
 
-  // Real rug-risk heuristic, computed from whatever on-chain data we
-  // actually have (liquidity, right now). Fields we don't yet source
-  // (LP lock status, mint/freeze authority, holder concentration) are left
-  // null and shown as "Unknown" in the UI rather than faked — wiring those
-  // up needs a Helius-based holder/authority lookup, which isn't built yet.
+  // Real rug-risk heuristic. LP lock/burn status stays "Unknown" — see
+  // lib/helius.ts's getMintSafety doc comment for why that's a deliberately
+  // separate, bigger feature rather than a faked heuristic. Mint/freeze
+  // authority and top-10-holder concentration are now real on-chain reads.
   const rugScore = overview
     ? heuristicRugScore({
         liquidityUsd: overview.liquidityUsd,
-        topHolderPct: null,
+        topHolderPct: mintSafety.topHolderPct,
         lpLocked: null,
-        mintAuthorityRevoked: null,
+        mintAuthorityRevoked: mintSafety.mintAuthorityRevoked,
       })
     : null;
 
@@ -57,7 +60,7 @@ export default async function TokenDetailPage({
         rugScore,
         liquidityUsd: overview!.liquidityUsd,
         holderCount: null,
-        topHolderPct: null,
+        topHolderPct: mintSafety.topHolderPct,
       })
     : null;
 
@@ -88,11 +91,11 @@ export default async function TokenDetailPage({
           <div>
             <div className="flex items-center gap-3">
               <div className="flex h-11 w-11 items-center justify-center rounded-full border border-border bg-surface-2 font-display text-base font-semibold text-signal-soft">
-                {overview.symbol.slice(0, 2).toUpperCase()}
+                {overview.symbol.replace(/^\$+/, "").slice(0, 2).toUpperCase()}
               </div>
               <div>
                 <h1 className="font-display text-2xl font-semibold text-ink">
-                  ${overview.symbol}
+                  {formatSymbol(overview.symbol)}
                 </h1>
                 <div className="flex items-center gap-1.5 font-mono text-xs text-ink-faint">
                   {shortenAddress(address, 6)}
@@ -104,9 +107,7 @@ export default async function TokenDetailPage({
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm">
-              <Star className="h-4 w-4" /> Add to watchlist
-            </Button>
+            <AddToWatchlistButton mintAddress={address} />
           </div>
         </div>
 
@@ -161,9 +162,9 @@ export default async function TokenDetailPage({
                 rugScore: rugScore ?? 50,
                 lpLocked: null,
                 lpBurned: null,
-                mintAuthorityRevoked: null,
-                freezeAuthorityRevoked: null,
-                topHolderPct: null,
+                mintAuthorityRevoked: mintSafety.mintAuthorityRevoked,
+                freezeAuthorityRevoked: mintSafety.freezeAuthorityRevoked,
+                topHolderPct: mintSafety.topHolderPct,
                 liquidityUsd: overview.liquidityUsd,
               }}
             />

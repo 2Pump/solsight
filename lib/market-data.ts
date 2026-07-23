@@ -8,6 +8,51 @@
 const BIRDEYE_BASE = "https://public-api.birdeye.so";
 const DEXSCREENER_BASE = process.env.DEXSCREENER_BASE_URL ?? "https://api.dexscreener.com";
 
+/**
+ * Birdeye's free/dev tier rate limit is tight enough that a burst of
+ * requests (multiple page loads, dev hot-reloads, several users hitting the
+ * same 30s revalidate window) can trigger a 429. Previously that surfaced
+ * as an empty chart/overview with no explanation. This wraps any fetch with
+ * a couple of short retries specifically for 429s — honoring a `Retry-After`
+ * header if Birdeye sends one, falling back to short exponential backoff
+ * otherwise — so a transient rate limit self-heals instead of immediately
+ * presenting an empty state.
+ */
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  { retries = 2, baseDelayMs = 400 }: { retries?: number; baseDelayMs?: number } = {}
+): Promise<Response> {
+  let lastRes: Response | null = null;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    let res: Response;
+    try {
+      res = await fetch(url, init);
+    } catch (err) {
+      if (attempt === retries) throw err;
+      await sleep(baseDelayMs * 2 ** attempt);
+      continue;
+    }
+
+    if (res.status !== 429) return res;
+
+    lastRes = res;
+    if (attempt === retries) break; // out of retries, return the 429 as-is
+
+    const retryAfterHeader = res.headers.get("retry-after");
+    const retryAfterMs = retryAfterHeader ? Number(retryAfterHeader) * 1000 : NaN;
+    const delay = Number.isFinite(retryAfterMs) ? retryAfterMs : baseDelayMs * 2 ** attempt;
+    await sleep(delay);
+  }
+
+  return lastRes!;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export interface TokenOverview {
   mintAddress: string;
   symbol: string;
@@ -26,10 +71,10 @@ export async function getTokenOverview(mintAddress: string): Promise<TokenOvervi
 
   if (apiKey) {
     try {
-      const res = await fetch(`${BIRDEYE_BASE}/defi/token_overview?address=${mintAddress}`, {
-        headers: { "X-API-KEY": apiKey, "x-chain": "solana" },
-        next: { revalidate: 30 },
-      });
+      const res = await fetchWithRetry(
+        `${BIRDEYE_BASE}/defi/token_overview?address=${mintAddress}`,
+        { headers: { "X-API-KEY": apiKey, "x-chain": "solana" }, next: { revalidate: 30 } }
+      );
       if (res.ok) {
         const json = await res.json();
         const d = json.data;
@@ -45,6 +90,9 @@ export async function getTokenOverview(mintAddress: string): Promise<TokenOvervi
           priceChange1h: d.priceChange1hPercent ?? null,
           priceChange24h: d.priceChange24hPercent ?? null,
         };
+      }
+      if (res.status === 429) {
+        console.error("[birdeye] getTokenOverview rate-limited after retries, falling back to Dexscreener");
       }
     } catch {
       // fall through to Dexscreener
@@ -154,7 +202,7 @@ export async function getCandles(
   const now = Math.floor(Date.now() / 1000);
   const from = now - 60 * 60 * 24 * 3; // last 3 days
 
-  const res = await fetch(
+  const res = await fetchWithRetry(
     `${BIRDEYE_BASE}/defi/v3/ohlcv?address=${mintAddress}&type=${typeMap[timeframe]}&currency=usd&time_from=${from}&time_to=${now}`,
     { headers: { "X-API-KEY": apiKey, "x-chain": "solana" }, next: { revalidate: 30 } }
   );
@@ -174,11 +222,56 @@ export async function getCandles(
   }));
 }
 
+export interface TrendingToken {
+  mintAddress: string;
+  symbol: string;
+  name: string;
+  imageUrl: string | null;
+  priceUsd: number | null;
+  liquidityUsd: number | null;
+  volume24hUsd: number | null;
+  rank: number;
+}
+
+/**
+ * Real trending-tokens list from Birdeye, used to auto-discover new tokens
+ * for the signal feed instead of leaving it seeded with only a couple of
+ * sample rows. Sorted by 24h volume rather than Birdeye's default "rank"
+ * (popularity) sort — a lesson learned on a sibling project, where a
+ * popularity-ranked trending list surfaced tokens with real trading
+ * activity far less often than a volume-sorted one does.
+ */
+export async function getTrendingTokens(limit = 20): Promise<TrendingToken[]> {
+  const apiKey = process.env.BIRDEYE_API_KEY;
+  if (!apiKey) return [];
+
+  const res = await fetchWithRetry(
+    `${BIRDEYE_BASE}/defi/token_trending?sort_by=volume24hUSD&sort_type=desc&offset=0&limit=${limit}`,
+    { headers: { "X-API-KEY": apiKey, "x-chain": "solana" }, next: { revalidate: 300 } }
+  );
+  if (!res.ok) {
+    console.error(`[birdeye] getTrendingTokens failed: ${res.status} ${res.statusText}`);
+    return [];
+  }
+
+  const json = await res.json();
+  const tokens: Array<Record<string, unknown>> = json.data?.tokens ?? [];
+
+  return tokens.map((t, i) => ({
+    mintAddress: String(t.address),
+    symbol: String(t.symbol ?? "UNKNOWN"),
+    name: String(t.name ?? t.symbol ?? "Unknown token"),
+    imageUrl: (t.logoURI as string | undefined) ?? null,
+    priceUsd: typeof t.price === "number" ? t.price : null,
+    liquidityUsd: typeof t.liquidity === "number" ? t.liquidity : null,
+    volume24hUsd: typeof t.volume24hUSD === "number" ? t.volume24hUSD : null,
+    rank: i + 1,
+  }));
+}
+
 /**
  * Very small heuristic rug-risk scorer used as a rules-engine fallback when
  * a fuller on-chain audit hasn't run yet. Returns 0 (safe) – 100 (risky).
- * Real deployments should replace/augment this with a dedicated screener
- * (e.g. RugCheck, Bubblemaps, or a custom Helius-based holder analysis job).
  */
 export function heuristicRugScore(input: {
   liquidityUsd: number | null;

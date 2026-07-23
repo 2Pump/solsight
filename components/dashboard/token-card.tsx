@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { TrendingUp, TrendingDown } from "lucide-react";
-import { formatUsd, formatCompact, formatPct, cn } from "@/lib/utils";
+import { formatUsd, formatCompact, formatPct, formatSymbol, cn } from "@/lib/utils";
 
 export interface TokenCardData {
   mintAddress: string;
@@ -43,7 +43,7 @@ export function TokenCard({ token }: { token: TokenCardData }) {
             {token.symbol.replace("$", "").slice(0, 2)}
           </div>
           <div>
-            <div className="font-mono text-sm font-medium text-ink">{token.symbol}</div>
+            <div className="font-mono text-sm font-medium text-ink">{formatSymbol(token.symbol)}</div>
             <div className="text-xs text-ink-faint">{token.name}</div>
           </div>
         </div>

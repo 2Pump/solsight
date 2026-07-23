@@ -1,20 +1,49 @@
 /**
- * Helius Enhanced Transactions API client.
- * Docs: https://docs.helius.dev/solana-apis/enhanced-transactions-api
+ * Helius API client — Enhanced Transactions (fund-flow), Solana JSON-RPC
+ * (mint safety / holder concentration), and Wallet balances.
  *
- * This powers the wallet deep-dive page: we pull a wallet's recent parsed
- * transactions, extract token/SOL transfers, and aggregate them into a
- * fund-flow graph (who this wallet sent to / received from, how often).
- *
- * Important honesty note: this gives you real fund-flow data — it does NOT
- * do insider-cluster detection, wash-trading detection, or wallet risk
- * scoring. Flagging a wallet as suspicious is a much harder problem that
- * would need its own heuristics/ML on top of this data. We deliberately
- * never fabricate a "flagged" label here — every node from this function
- * comes back unflagged until real detection logic is built.
+ * Important honesty note: this gives you real fund-flow and on-chain data —
+ * it does NOT do insider-cluster detection, wash-trading detection, or
+ * wallet risk scoring. Flagging a wallet as suspicious is a much harder
+ * problem that would need its own heuristics/ML on top of this data. We
+ * deliberately never fabricate a "flagged" label here — every node from
+ * this function comes back unflagged until real detection logic is built.
  */
 
-const HELIUS_BASE = "https://api-mainnet.helius-rpc.com/v0";
+const HELIUS_ENHANCED_BASE = "https://api-mainnet.helius-rpc.com/v0";
+const HELIUS_WALLET_API_BASE = "https://api.helius.xyz/v1";
+
+function heliusRpcUrl(apiKey: string) {
+  return `https://mainnet.helius-rpc.com/?api-key=${apiKey}`;
+}
+
+async function heliusRpc<T>(
+  method: string,
+  params: unknown[],
+  apiKey: string
+): Promise<T | null> {
+  try {
+    const res = await fetch(heliusRpcUrl(apiKey), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: "solsight", method, params }),
+      next: { revalidate: 300 },
+    });
+    if (!res.ok) {
+      console.error(`[helius] RPC ${method} failed: ${res.status} ${res.statusText}`);
+      return null;
+    }
+    const json = await res.json();
+    if (json.error) {
+      console.error(`[helius] RPC ${method} returned an error:`, json.error);
+      return null;
+    }
+    return json.result as T;
+  } catch (err) {
+    console.error(`[helius] RPC ${method} threw:`, err);
+    return null;
+  }
+}
 
 interface HeliusTokenTransfer {
   fromUserAccount: string | null;
@@ -52,7 +81,7 @@ export async function getWalletFundFlow(
   if (!apiKey) return { edges: [], txCount: 0 };
 
   const res = await fetch(
-    `${HELIUS_BASE}/addresses/${address}/transactions?api-key=${apiKey}&limit=${limit}`,
+    `${HELIUS_ENHANCED_BASE}/addresses/${address}/transactions?api-key=${apiKey}&limit=${limit}`,
     { next: { revalidate: 60 } }
   );
   if (!res.ok) {
@@ -100,16 +129,37 @@ export async function getWalletFundFlow(
   return { edges, txCount: transactions.length };
 }
 
-export interface WalletBalanceSummary {
-  solBalance: number;
-  tokenCount: number;
+export interface WalletHolding {
+  mint: string;
+  symbol: string | null;
+  amount: number;
+  usdValue: number | null;
 }
 
+export interface WalletBalanceSummary {
+  solBalance: number;
+  solUsdValue: number | null;
+  tokenCount: number;
+  totalUsdValue: number | null;
+  topHoldings: WalletHolding[];
+}
+
+/**
+ * Wallet balances, including USD values. This previously called
+ * `${api-mainnet.helius-rpc.com}/v0/addresses/{address}/balances`, which is
+ * not a real Helius endpoint — that RPC-style host only serves the
+ * Enhanced Transactions API above. Helius's actual balances-with-USD-value
+ * data lives on the separate Wallet API host (api.helius.xyz), which is
+ * what this now calls. If Helius changes this response shape again, every
+ * field below is read defensively (optional chaining + explicit fallback)
+ * so a shape mismatch degrades to "Balance data unavailable" instead of
+ * throwing — but the endpoint/host itself is the fix for the bug we had.
+ */
 export async function getWalletBalances(address: string): Promise<WalletBalanceSummary | null> {
   const apiKey = process.env.HELIUS_API_KEY;
   if (!apiKey) return null;
 
-  const res = await fetch(`${HELIUS_BASE}/addresses/${address}/balances?api-key=${apiKey}`, {
+  const res = await fetch(`${HELIUS_WALLET_API_BASE}/wallet/${address}/balances?api-key=${apiKey}`, {
     next: { revalidate: 60 },
   });
   if (!res.ok) {
@@ -118,8 +168,107 @@ export async function getWalletBalances(address: string): Promise<WalletBalanceS
   }
 
   const data = await res.json();
+
+  const nativeLamports = data?.nativeBalance?.lamports ?? data?.nativeBalance ?? 0;
+  const solBalance = Number(nativeLamports) / 1e9;
+  const solUsdValue = typeof data?.nativeBalance?.usdValue === "number" ? data.nativeBalance.usdValue : null;
+
+  const tokens: Array<Record<string, unknown>> = Array.isArray(data?.tokens) ? data.tokens : [];
+
+  const topHoldings: WalletHolding[] = tokens
+    .map((t) => ({
+      mint: String(t.mint ?? ""),
+      symbol: (t.symbol as string | undefined) ?? null,
+      amount: Number(t.amount ?? 0),
+      usdValue: typeof t.usdValue === "number" ? t.usdValue : null,
+    }))
+    .filter((t) => t.mint)
+    .sort((a, b) => (b.usdValue ?? 0) - (a.usdValue ?? 0))
+    .slice(0, 5);
+
+  const tokensUsdTotal = tokens.reduce(
+    (sum, t) => sum + (typeof t.usdValue === "number" ? t.usdValue : 0),
+    0
+  );
+  const totalUsdValue =
+    typeof data?.totalUsdValue === "number"
+      ? data.totalUsdValue
+      : solUsdValue !== null
+        ? solUsdValue + tokensUsdTotal
+        : null;
+
   return {
-    solBalance: (data.nativeBalance ?? 0) / 1e9,
-    tokenCount: Array.isArray(data.tokens) ? data.tokens.length : 0,
+    solBalance,
+    solUsdValue,
+    tokenCount: tokens.length,
+    totalUsdValue,
+    topHoldings,
   };
+}
+
+export interface MintSafety {
+  /** true = mint authority has been revoked (no one can mint more supply). null = couldn't be determined. */
+  mintAuthorityRevoked: boolean | null;
+  /** true = freeze authority has been revoked (no one can freeze holder accounts). null = couldn't be determined. */
+  freezeAuthorityRevoked: boolean | null;
+  /**
+   * % of total supply held by the 10 largest token accounts on-chain.
+   * Note: these are the largest *token accounts*, not necessarily 10
+   * distinct human holders — a DEX pool's own account can appear here.
+   * Still real on-chain data; just not perfectly deduplicated by owner.
+   */
+  topHolderPct: number | null;
+}
+
+/**
+ * Real on-chain mint safety checks via Helius's Solana RPC — replaces the
+ * "Unknown" placeholders for mint/freeze authority and holder concentration
+ * with actual data read directly from the mint account.
+ *
+ * LP lock/burn status is deliberately NOT included here. Determining it
+ * correctly requires first resolving which AMM pool holds the token's
+ * liquidity (Raydium, Orca, Meteora, etc. each store this differently) and
+ * then checking whether that specific pool's LP mint was burned or sent to
+ * a locker contract — a meaningfully bigger feature on its own, not a
+ * couple of RPC calls. Faking that field with a heuristic would violate
+ * this project's real-data-only rule, so it stays "Unknown" until that
+ * dedicated feature gets built.
+ */
+export async function getMintSafety(mintAddress: string): Promise<MintSafety> {
+  const apiKey = process.env.HELIUS_API_KEY;
+  if (!apiKey) {
+    return { mintAuthorityRevoked: null, freezeAuthorityRevoked: null, topHolderPct: null };
+  }
+
+  const [accountInfo, largestAccounts] = await Promise.all([
+    heliusRpc<{ value: { data: { parsed: { info: Record<string, unknown> } } } | null }>(
+      "getAccountInfo",
+      [mintAddress, { encoding: "jsonParsed" }],
+      apiKey
+    ),
+    heliusRpc<{ value: Array<{ amount: string }> }>(
+      "getTokenLargestAccounts",
+      [mintAddress],
+      apiKey
+    ),
+  ]);
+
+  const parsed = accountInfo?.value?.data?.parsed?.info;
+  if (!parsed) {
+    console.error(`[helius] getMintSafety: could not read mint account for ${mintAddress}`);
+    return { mintAuthorityRevoked: null, freezeAuthorityRevoked: null, topHolderPct: null };
+  }
+
+  const mintAuthorityRevoked = parsed.mintAuthority === null;
+  const freezeAuthorityRevoked = parsed.freezeAuthority === null;
+
+  let topHolderPct: number | null = null;
+  const supply = Number(parsed.supply);
+  const accounts = largestAccounts?.value;
+  if (accounts?.length && supply > 0) {
+    const top10Sum = accounts.slice(0, 10).reduce((sum, a) => sum + Number(a.amount), 0);
+    topHolderPct = Math.min(100, (top10Sum / supply) * 100);
+  }
+
+  return { mintAuthorityRevoked, freezeAuthorityRevoked, topHolderPct };
 }
