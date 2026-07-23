@@ -41,7 +41,7 @@
     
     "@anthropic-ai/sdk": "0.33.1",
 
-    "inngest": "3.27.4",
+    "inngest": "3.54.2",
 
     "lightweight-charts": "4.2.2",
 
