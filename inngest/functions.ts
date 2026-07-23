@@ -106,8 +106,10 @@ export const discoverTrendingTokens = inngest.createFunction(
         // it through the memecoin-tuned rug heuristic produces nonsense
         // (a large, liquid, well-established token can score EXTREME risk
         // purely because "LP lock status unknown" is scored as a red flag,
-        // which it isn't at that scale).
-        if (overview && isAboveMemecoinMarketCapCeiling(overview.marketCapUsd)) {
+        // which it isn't at that scale). Liquidity is passed alongside
+        // market cap as a fallback signal for when market cap comes back
+        // null — see isAboveMemecoinMarketCapCeiling's doc comment.
+        if (overview && isAboveMemecoinMarketCapCeiling(overview.marketCapUsd, overview.liquidityUsd)) {
           return { token: null, isNew: false, rugScore: null, skippedAsBlueChip: true };
         }
 

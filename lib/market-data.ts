@@ -38,12 +38,30 @@ const BLUE_CHIP_MINTS = new Set([
 /** Above this real market cap, a token is treated as a large-cap/blue-chip and skipped from memecoin discovery, even if not on the explicit denylist above. */
 const MEMECOIN_MARKET_CAP_CEILING_USD = 50_000_000;
 
+/**
+ * Fallback ceiling on liquidity alone, used only when market cap comes back
+ * null. A real memecoin virtually never has this much liquidity — tokens
+ * this deep are established, regardless of whether Birdeye reported a
+ * market cap for them. This exists specifically because "market cap
+ * unknown" was previously treated as "assume it's fine," which is how
+ * WETH and ZEC both slipped through discovery despite genuinely being
+ * large-cap assets — better to skip a token on ambiguous data here than
+ * mis-score it with the memecoin-tuned rug heuristic.
+ */
+const MEMECOIN_LIQUIDITY_FALLBACK_CEILING_USD = 2_000_000;
+
 export function isBlueChipMint(mintAddress: string): boolean {
   return BLUE_CHIP_MINTS.has(mintAddress);
 }
 
-export function isAboveMemecoinMarketCapCeiling(marketCapUsd: number | null): boolean {
-  return marketCapUsd !== null && marketCapUsd > MEMECOIN_MARKET_CAP_CEILING_USD;
+export function isAboveMemecoinMarketCapCeiling(
+  marketCapUsd: number | null,
+  liquidityUsd: number | null = null
+): boolean {
+  if (marketCapUsd !== null) return marketCapUsd > MEMECOIN_MARKET_CAP_CEILING_USD;
+  // Market cap unknown — fall back to a conservative liquidity check rather
+  // than assuming it's safe to treat as a small-cap candidate.
+  return liquidityUsd !== null && liquidityUsd > MEMECOIN_LIQUIDITY_FALLBACK_CEILING_USD;
 }
 
 /**
@@ -122,7 +140,15 @@ export async function getTokenOverview(mintAddress: string): Promise<TokenOvervi
           name: d.name,
           imageUrl: d.logoURI ?? null,
           priceUsd: d.price ?? null,
-          marketCapUsd: d.mc ?? null,
+          // Birdeye's documented response fields are `realMc` (circulating-
+          // supply-adjusted market cap) and `marketCap` (fallback) — `mc`
+          // is not a real field in their schema. Reading the wrong key here
+          // silently returned null for every token, which meant the
+          // memecoin market-cap ceiling filter never actually fired (a
+          // null market cap was treated as "not above the ceiling," so
+          // large-caps like WETH and ZEC slipped through the discovery
+          // filter despite the ceiling logic being correct).
+          marketCapUsd: d.realMc ?? d.marketCap ?? null,
           liquidityUsd: d.liquidity ?? null,
           volume24hUsd: d.v24hUSD ?? null,
           priceChange1h: d.priceChange1hPercent ?? null,
