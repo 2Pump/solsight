@@ -32,15 +32,21 @@ export async function POST(req: NextRequest) {
   const parsed = addSchema.safeParse(await req.json());
   if (!parsed.success) return NextResponse.json({ error: parsed.error.flatten() }, { status: 400 });
 
+  // Resolve the target watchlist: either the one explicitly requested, or
+  // the user's default watchlist (created lazily on first use). There's no
+  // compound unique constraint on (userId, isDefault) in the schema — a user
+  // could in principle end up with more than one row flagged isDefault if
+  // this ran concurrently, but for a single-user "add to watchlist" click
+  // that's an acceptable tradeoff over adding a schema constraint that would
+  // also block a user from ever having two non-default watchlists.
   const watchlist = parsed.data.watchlistId
     ? await prisma.watchlist.findFirstOrThrow({
         where: { id: parsed.data.watchlistId, userId },
       })
-    : await prisma.watchlist.upsert({
-        where: { userId_isDefault: { userId, isDefault: true } as never },
-        update: {},
-        create: { userId, isDefault: true, name: "My Watchlist" },
-      });
+    : ((await prisma.watchlist.findFirst({ where: { userId, isDefault: true } })) ??
+      (await prisma.watchlist.create({
+        data: { userId, isDefault: true, name: "My Watchlist" },
+      })));
 
   const token = await prisma.token.findUnique({ where: { mintAddress: parsed.data.mintAddress } });
   if (!token) return NextResponse.json({ error: "Token not found — sync it first" }, { status: 404 });

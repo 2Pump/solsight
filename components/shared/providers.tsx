@@ -14,7 +14,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
             accentColor: "#7C5CFF",
             logo: "/logo-mark.svg",
           },
-          embeddedWallets: { createOnLogin: "users-without-wallets" },
+          embeddedWallets: { solana: { createOnLogin: "users-without-wallets" } },
           loginMethods: ["wallet", "discord", "email"],
         }}
       >

@@ -33,7 +33,7 @@
     "next-auth": "5.0.0-beta.25",
     "@auth/prisma-adapter": "2.7.4",
 
-    "@privy-io/react-auth": "1.94.0",
+    "@privy-io/react-auth": "3.35.1",
 
     "@solana/web3.js": "1.98.0",
     "tweetnacl": "1.0.3",
