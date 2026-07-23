@@ -286,8 +286,16 @@ export async function getCandles(
   }
   const json = await res.json();
 
+  // Birdeye's v3 OHLCV response doesn't reliably use `unixTime` the way
+  // their older v1 endpoint does — every candle's `open`/`high`/`low`/
+  // `close`/`volume` mapped correctly, but `time` came through as
+  // `undefined` for every single candle, silently failing chart rendering
+  // client-side with no server error (the fetch itself succeeds; only this
+  // one field is wrong). Rather than guess a single new field name and
+  // risk this breaking again on the next Birdeye schema tweak, check the
+  // plausible candidates in order.
   return (json.data?.items ?? []).map((c: Record<string, number>) => ({
-    time: c.unixTime,
+    time: c.unixTime ?? c.time ?? c.timestamp ?? c.unix_time,
     open: c.o,
     high: c.h,
     low: c.l,
