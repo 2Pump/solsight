@@ -43,8 +43,25 @@ export function PriceChart({ candles, keyLevels = [] }: { candles: Candle[]; key
       wickDownColor: "#FF5C7A",
     });
 
+    // lightweight-charts requires strictly ascending, unique, valid-number
+    // timestamps — it fails with a cryptic internal error otherwise (seen
+    // in the wild with some API responses that return slightly out-of-order
+    // or duplicate candle buckets). Clean the data defensively rather than
+    // trusting the API's ordering.
+    const cleaned = candles
+      .filter(
+        (c) =>
+          Number.isFinite(c.time) &&
+          Number.isFinite(c.open) &&
+          Number.isFinite(c.high) &&
+          Number.isFinite(c.low) &&
+          Number.isFinite(c.close)
+      )
+      .sort((a, b) => a.time - b.time)
+      .filter((c, i, arr) => i === 0 || c.time !== arr[i - 1].time); // drop duplicate timestamps
+
     series.setData(
-      candles.map((c) => ({
+      cleaned.map((c) => ({
         time: c.time as unknown as never,
         open: c.open,
         high: c.high,

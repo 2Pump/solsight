@@ -1,8 +1,10 @@
 import Link from "next/link";
-import { Plus, ExternalLink } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { ExternalLink } from "lucide-react";
 import { shortenAddress } from "@/lib/utils";
+import { WalletSearchBar } from "@/components/dashboard/wallet-search-bar";
 
+// Sample data — in production this reads the signed-in user's TrackedWallet
+// rows from Prisma. Shown here so the page is meaningful before that's wired up.
 const TRACKED = [
   { address: "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin", label: "Early WIF buyer" },
   { address: "3kLmT4zP2yGh8vDxNqW1sJfR7cVbXoAe6yUiHm5aQ9wZ", label: "Flagged — repeat rugger" },
@@ -11,16 +13,15 @@ const TRACKED = [
 export default function TrackedWalletsPage() {
   return (
     <div>
-      <div className="mb-6 flex items-center justify-between">
-        <div>
-          <h1 className="font-display text-2xl font-semibold text-ink">Tracked Wallets</h1>
-          <p className="mt-1 text-sm text-ink-muted">
-            Get notified when these wallets move funds or open new positions.
-          </p>
-        </div>
-        <Button size="sm">
-          <Plus className="h-4 w-4" /> Track wallet
-        </Button>
+      <div className="mb-6">
+        <h1 className="font-display text-2xl font-semibold text-ink">Tracked Wallets</h1>
+        <p className="mt-1 text-sm text-ink-muted">
+          Get notified when these wallets move funds or open new positions.
+        </p>
+      </div>
+
+      <div className="mb-6">
+        <WalletSearchBar />
       </div>
 
       <div className="glass divide-y divide-border">

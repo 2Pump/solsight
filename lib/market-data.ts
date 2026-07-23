@@ -74,6 +74,55 @@ export async function getTokenOverview(mintAddress: string): Promise<TokenOvervi
   };
 }
 
+export interface TokenSearchResult {
+  mintAddress: string;
+  symbol: string;
+  name: string;
+  imageUrl: string | null;
+  priceUsd: number | null;
+}
+
+/**
+ * Search for Solana tokens by symbol or name via Dexscreener's public
+ * search endpoint (no API key required). Used to power the "look up a
+ * token" search bar — resolves something like "BONK" to its real mint
+ * address so users don't need to already know it.
+ */
+export async function searchTokens(query: string): Promise<TokenSearchResult[]> {
+  if (!query.trim()) return [];
+
+  const res = await fetch(
+    `${DEXSCREENER_BASE}/latest/dex/search?q=${encodeURIComponent(query)}`,
+    { next: { revalidate: 30 } }
+  );
+  if (!res.ok) return [];
+
+  const json = await res.json();
+  const pairs: Array<Record<string, unknown>> = json.pairs ?? [];
+
+  const seen = new Set<string>();
+  const results: TokenSearchResult[] = [];
+
+  for (const pair of pairs) {
+    if (pair.chainId !== "solana") continue;
+    const baseToken = pair.baseToken as { address: string; symbol: string; name: string };
+    if (!baseToken?.address || seen.has(baseToken.address)) continue;
+    seen.add(baseToken.address);
+
+    results.push({
+      mintAddress: baseToken.address,
+      symbol: baseToken.symbol,
+      name: baseToken.name,
+      imageUrl: (pair.info as { imageUrl?: string } | undefined)?.imageUrl ?? null,
+      priceUsd: pair.priceUsd ? Number(pair.priceUsd) : null,
+    });
+
+    if (results.length >= 8) break;
+  }
+
+  return results;
+}
+
 export interface Candle {
   time: number; // unix seconds
   open: number;
@@ -90,14 +139,29 @@ export async function getCandles(
   const apiKey = process.env.BIRDEYE_API_KEY;
   if (!apiKey) return [];
 
+  // Birdeye's OHLCV "type" values use uppercase for hour/day/week/month
+  // granularities (1H, 1D) but lowercase for minutes (1m, 15m) — this maps
+  // our simpler lowercase timeframe values to what their API actually expects.
+  const typeMap: Record<string, string> = {
+    "1m": "1m",
+    "5m": "5m",
+    "15m": "15m",
+    "1h": "1H",
+    "4h": "4H",
+    "1d": "1D",
+  };
+
   const now = Math.floor(Date.now() / 1000);
   const from = now - 60 * 60 * 24 * 3; // last 3 days
 
   const res = await fetch(
-    `${BIRDEYE_BASE}/defi/ohlcv?address=${mintAddress}&type=${timeframe}&time_from=${from}&time_to=${now}`,
+    `${BIRDEYE_BASE}/defi/v3/ohlcv?address=${mintAddress}&type=${typeMap[timeframe]}&currency=usd&time_from=${from}&time_to=${now}`,
     { headers: { "X-API-KEY": apiKey, "x-chain": "solana" }, next: { revalidate: 30 } }
   );
-  if (!res.ok) return [];
+  if (!res.ok) {
+    console.error(`[birdeye] getCandles failed: ${res.status} ${res.statusText}`);
+    return [];
+  }
   const json = await res.json();
 
   return (json.data?.items ?? []).map((c: Record<string, number>) => ({

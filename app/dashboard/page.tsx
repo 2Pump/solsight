@@ -1,4 +1,5 @@
 import { TokenCard, type TokenCardData } from "@/components/dashboard/token-card";
+import { TokenSearchBar } from "@/components/dashboard/token-search-bar";
 import { Button } from "@/components/ui/button";
 import { Plus } from "lucide-react";
 
@@ -57,6 +58,10 @@ export default function DashboardPage() {
         <Button size="sm">
           <Plus className="h-4 w-4" /> Add token
         </Button>
+      </div>
+
+      <div className="mb-6">
+        <TokenSearchBar />
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
