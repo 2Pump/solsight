@@ -1,0 +1,29 @@
+[33mcommit 1594768dd8c78f748a5786bd6992d91a9f944735[m[33m ([m[1;36mHEAD[m[33m -> [m[1;32mmain[m[33m, [m[1;31morigin/main[m[33m)[m
+Author: 2Pump <yankowskyb@gmail.com>
+Date:   Thu Jul 23 18:42:28 2026 -0400
+
+    Fix market cap field mapping (was reading nonexistent Birdeye field)
+    
+    - Birdeye's actual fields are realMc/marketCap, not mc — the wrong key
+      meant marketCapUsd was always null, silently disabling the memecoin
+      discovery ceiling filter for any token missing a denylist entry
+    - Add liquidity-based fallback ceiling for when market cap genuinely
+      comes back unknown, instead of treating unknown as safe to include
+
+[33mcommit 89059b2125f16d0060853e6ec29518545143a283[m
+Author: 2Pump <yankowskyb@gmail.com>
+Date:   Thu Jul 23 18:22:38 2026 -0400
+
+    Fix market cap field mapping (was reading nonexistent Birdeye field)
+    
+    - Birdeye's actual fields are realMc/marketCap, not mc — the wrong key
+      meant marketCapUsd was always null, silently disabling the memecoin
+      discovery ceiling filter for any token missing a denylist entry
+    - Add liquidity-based fallback ceiling for when market cap genuinely
+      comes back unknown, instead of treating unknown as safe to include
+
+[33mcommit d350bf8988d7716a65776951b3f1f134aa2683f4[m
+Author: 2Pump <yankowskyb@gmail.com>
+Date:   Thu Jul 23 17:55:56 2026 -0400
+
+    Filter blue-chip/large-cap tokens out of trending discovery
