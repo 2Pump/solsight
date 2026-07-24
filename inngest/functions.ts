@@ -8,26 +8,31 @@ import {
   heuristicRugScore,
   isAboveMemecoinMarketCapCeiling,
 } from "@/lib/market-data";
-import { getMintSafety, checkLpBurnStatus } from "@/lib/helius";
+import { getMintSafety, checkLpBurnStatus, getPumpSwapLpMint } from "@/lib/helius";
 import { FEED_SIGNAL_CAP } from "@/lib/utils";
 
 /**
  * Real, verified LP burn check for a token's primary pool.
  *
- * Only covers Raydium Standard (classic constant-product) pools — verified
- * end-to-end against a live pool during testing: Raydium's own public API
- * (api-v3.raydium.io) resolves the pool to its real LP mint, then a plain
- * getTokenSupply RPC call checks whether that mint's supply is zero. A
- * manual earlier attempt at decoding pool accounts by a guessed byte offset
- * was verified WRONG (decoded to the null address) and was replaced by
- * this API-based approach, which was then verified correct against
- * Solscan (exact LP token match, exact supply match).
+ * Covers two verified paths, both confirmed end-to-end against Solscan
+ * (exact LP token match, exact supply match):
+ * - Raydium Standard (classic constant-product) pools — LP mint resolved
+ *   via Raydium's own public API, then a getTokenSupply RPC check.
+ * - PumpSwap pools — LP mint derived via PDA (seeds ["pool_lp_mint", pool]
+ *   under the PumpSwap program), self-checked to confirm the derived
+ *   address is a real mint before trusting it, then the same supply check.
+ *
+ * An earlier manual attempt at decoding Raydium pool accounts by a guessed
+ * byte offset was verified WRONG (decoded to the null address) and was
+ * replaced by the API-based approach above.
  *
  * Everything else stays "Unknown" (null) rather than guessed:
- * - Non-Raydium pools (Meteora, Orca, pump.fun bonding curves, etc.)
- * - Raydium CLMM ("Concentrated") pools — these use per-position NFTs
- *   instead of one fungible LP token, so there's no single supply to check
- * - LP "locked" status (as opposed to burned) — that requires recognizing
+ * - pump.fun bonding-curve (pre-graduation) tokens — no LP token exists
+ *   yet at that stage, so there's genuinely nothing to check
+ * - Meteora and other DEXes — not yet built
+ * - Raydium CLMM ("Concentrated") pools — per-position NFTs, not one
+ *   fungible LP token, so there's no single supply to check
+ * - LP "locked" status (as opposed to burned) — requires recognizing
  *   specific locker-program addresses, which isn't built
  *
  * A Birdeye Security-endpoint-based guess was tried earlier and dropped:
@@ -36,13 +41,23 @@ import { FEED_SIGNAL_CAP } from "@/lib/utils";
  */
 async function getVerifiedLpBurnStatus(mintAddress: string): Promise<boolean | null> {
   const pairInfo = await getPrimaryPairInfo(mintAddress);
-  if (!pairInfo || pairInfo.dexId !== "raydium") return null;
+  if (!pairInfo) return null;
 
-  const poolInfo = await getRaydiumPoolLpInfo(pairInfo.pairAddress);
-  if (poolInfo.poolType !== "Standard" || !poolInfo.lpMint) return null;
+  if (pairInfo.dexId === "raydium") {
+    const poolInfo = await getRaydiumPoolLpInfo(pairInfo.pairAddress);
+    if (poolInfo.poolType !== "Standard" || !poolInfo.lpMint) return null;
+    const burnStatus = await checkLpBurnStatus(poolInfo.lpMint);
+    return burnStatus.lpBurned;
+  }
 
-  const burnStatus = await checkLpBurnStatus(poolInfo.lpMint);
-  return burnStatus.lpBurned;
+  if (pairInfo.dexId === "pumpswap") {
+    const lpInfo = await getPumpSwapLpMint(pairInfo.pairAddress);
+    if (!lpInfo.verified || !lpInfo.lpMint) return null;
+    const burnStatus = await checkLpBurnStatus(lpInfo.lpMint);
+    return burnStatus.lpBurned;
+  }
+
+  return null;
 }
 
 /**
