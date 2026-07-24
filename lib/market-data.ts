@@ -196,6 +196,42 @@ export async function getTokenOverview(mintAddress: string): Promise<TokenOvervi
   };
 }
 
+export interface PrimaryPairInfo {
+  pairAddress: string;
+  dexId: string;
+}
+
+/**
+ * Finds a token's primary (highest-liquidity) trading pair via Dexscreener's
+ * public API — used to identify which DEX/pool holds a token's liquidity,
+ * as a prerequisite for on-chain LP burn verification (see
+ * lib/helius.ts's getRaydiumLpBurnStatus). Dexscreener's official API
+ * doesn't expose lock/burn status itself, only pair identity — the actual
+ * burn check has to be done on-chain.
+ */
+export async function getPrimaryPairInfo(mintAddress: string): Promise<PrimaryPairInfo | null> {
+  const res = await fetch(`${DEXSCREENER_BASE}/latest/dex/tokens/${mintAddress}`, {
+    next: { revalidate: 300 },
+  });
+  if (!res.ok) return null;
+
+  const json = await res.json();
+  const pairs: Array<Record<string, unknown>> = json.pairs ?? [];
+  if (pairs.length === 0) return null;
+
+  // Highest liquidity pair is the primary pool.
+  const sorted = [...pairs].sort((a, b) => {
+    const aLiq = ((a.liquidity as { usd?: number } | undefined)?.usd) ?? 0;
+    const bLiq = ((b.liquidity as { usd?: number } | undefined)?.usd) ?? 0;
+    return bLiq - aLiq;
+  });
+
+  const top = sorted[0];
+  if (!top?.pairAddress || !top?.dexId) return null;
+
+  return { pairAddress: String(top.pairAddress), dexId: String(top.dexId) };
+}
+
 export interface TokenSearchResult {
   mintAddress: string;
   symbol: string;
