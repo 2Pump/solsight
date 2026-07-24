@@ -205,7 +205,7 @@ export interface PrimaryPairInfo {
  * Finds a token's primary (highest-liquidity) trading pair via Dexscreener's
  * public API — used to identify which DEX/pool holds a token's liquidity,
  * as a prerequisite for on-chain LP burn verification (see
- * getRaydiumLpMint below and lib/helius.ts's checkLpBurnStatus).
+ * getRaydiumPoolLpInfo below and lib/helius.ts's checkLpBurnStatus).
  * Dexscreener's official API doesn't expose lock/burn status itself, only
  * pair identity — the actual burn check happens separately.
  */
@@ -232,6 +232,12 @@ export async function getPrimaryPairInfo(mintAddress: string): Promise<PrimaryPa
   return { pairAddress: String(top.pairAddress), dexId: String(top.dexId) };
 }
 
+export interface RaydiumPoolLpInfo {
+  lpMint: string | null;
+  /** Raydium pool type — "Standard" (classic constant-product, has a fungible LP mint we can check) or "Concentrated" (CLMM, uses per-position NFTs instead — no single LP mint/supply to check with this method). */
+  poolType: string | null;
+}
+
 /**
  * Looks up a Raydium pool's real LP mint address via Raydium's own public
  * API (api-v3.raydium.io) — no API key required, no binary account
@@ -243,23 +249,36 @@ export async function getPrimaryPairInfo(mintAddress: string): Promise<PrimaryPa
  * (decoded to the System Program's null address instead of a real mint).
  * Raydium's own API abstracts that away entirely, which is why this is
  * the more reliable path.
+ *
+ * Note: Concentrated Liquidity (CLMM) pools genuinely have no lpMint field
+ * — verified during testing against a real CLMM pool. CLMM liquidity is
+ * represented as per-position NFTs rather than one fungible LP token, so
+ * "check whether the LP mint's supply is zero" fundamentally doesn't apply
+ * to them. This returns poolType so callers can tell "not found/unsupported
+ * shape" apart from "this is a CLMM pool, which needs different handling
+ * we haven't built."
  */
-export async function getRaydiumLpMint(pairAddress: string): Promise<string | null> {
+export async function getRaydiumPoolLpInfo(pairAddress: string): Promise<RaydiumPoolLpInfo> {
   try {
     const res = await fetch(
       `https://api-v3.raydium.io/pools/info/ids?ids=${pairAddress}`,
       { next: { revalidate: 300 } }
     );
-    if (!res.ok) return null;
+    if (!res.ok) return { lpMint: null, poolType: null };
 
     const json = await res.json();
-    if (json.success === false) return null;
+    if (json.success === false) return { lpMint: null, poolType: null };
 
     const pool = json.data?.[0];
-    return pool?.lpMint?.address ?? pool?.lpMint ?? null;
+    if (!pool) return { lpMint: null, poolType: null };
+
+    return {
+      lpMint: pool.lpMint?.address ?? pool.lpMint ?? null,
+      poolType: pool.type ?? null,
+    };
   } catch (err) {
-    console.error(`[raydium] getRaydiumLpMint threw for ${pairAddress}:`, err);
-    return null;
+    console.error(`[raydium] getRaydiumPoolLpInfo threw for ${pairAddress}:`, err);
+    return { lpMint: null, poolType: null };
   }
 }
 

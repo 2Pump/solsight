@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getPrimaryPairInfo, getRaydiumLpMint } from "@/lib/market-data";
+import { getPrimaryPairInfo, getRaydiumPoolLpInfo } from "@/lib/market-data";
 import { checkLpBurnStatus } from "@/lib/helius";
 
 /**
@@ -29,38 +29,37 @@ export async function GET(req: NextRequest) {
     });
   }
 
-  // Fetch Raydium's raw response directly here (rather than going through
-  // getRaydiumLpMint) so we can see exactly what they returned — whether
-  // it's a clean "pool not found," an unexpected shape, or something else.
-  let raydiumRaw: unknown = null;
-  try {
-    const raydiumRes = await fetch(
-      `https://api-v3.raydium.io/pools/info/ids?ids=${pairInfo.pairAddress}`
-    );
-    raydiumRaw = await raydiumRes.json();
-  } catch (err) {
-    raydiumRaw = { fetchError: String(err) };
-  }
+  const poolInfo = await getRaydiumPoolLpInfo(pairInfo.pairAddress);
 
-  const lpMint = await getRaydiumLpMint(pairInfo.pairAddress);
-  if (!lpMint) {
+  if (poolInfo.poolType === "Concentrated") {
     return NextResponse.json({
       tokenAddress: address,
       pairAddress: pairInfo.pairAddress,
       dexId: pairInfo.dexId,
-      note: "Raydium's API didn't return an lpMint for this pool — either the pool ID is stale/wrong, or the response shape differs from expected.",
-      raydiumRawResponse: raydiumRaw,
+      poolType: poolInfo.poolType,
+      note: "This is a Raydium CLMM (Concentrated Liquidity) pool — liquidity is represented as per-position NFTs, not one fungible LP token, so there's no single supply to check for zero. This detection method only supports Standard (constant-product) pools right now.",
     });
   }
 
-  const burnStatus = await checkLpBurnStatus(lpMint);
+  if (!poolInfo.lpMint) {
+    return NextResponse.json({
+      tokenAddress: address,
+      pairAddress: pairInfo.pairAddress,
+      dexId: pairInfo.dexId,
+      poolType: poolInfo.poolType,
+      note: "Raydium's API didn't return an lpMint for this pool — either the pool ID is stale/wrong, or the response shape differs from expected.",
+    });
+  }
+
+  const burnStatus = await checkLpBurnStatus(poolInfo.lpMint);
 
   return NextResponse.json({
     tokenAddress: address,
     pairAddress: pairInfo.pairAddress,
     dexId: pairInfo.dexId,
-    lpMint,
+    poolType: poolInfo.poolType,
+    lpMint: poolInfo.lpMint,
     ...burnStatus,
-    verifyHint: `Cross-check: open https://solscan.io/token/${lpMint} on Solscan — does it look like an LP token, and does its supply match ${burnStatus.lpSupply}?`,
+    verifyHint: `Cross-check: open https://solscan.io/token/${poolInfo.lpMint} on Solscan — does it look like an LP token, and does its supply match ${burnStatus.lpSupply}?`,
   });
 }
