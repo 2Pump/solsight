@@ -245,6 +245,50 @@ export async function searchTokens(query: string): Promise<TokenSearchResult[]> 
   return results;
 }
 
+export interface LpSecurity {
+  lpLocked: boolean | null;
+  lpBurned: boolean | null;
+}
+
+/**
+ * Best-effort LP lock/burn check via Birdeye's dedicated Security endpoint
+ * (/defi/token_security). Birdeye's exact response schema for this endpoint
+ * isn't fully documented publicly, so this checks several plausible field
+ * name candidates rather than committing to one guess. If none match, both
+ * values stay null ("Unknown") — same honest fallback as before this
+ * existed, just with a real chance of getting genuine data when the fields
+ * do line up. This endpoint also requires at least a Lite/Starter Birdeye
+ * plan; on a lower tier it 403s and this degrades to null the same way.
+ */
+export async function getLpSecurity(mintAddress: string): Promise<LpSecurity> {
+  const apiKey = process.env.BIRDEYE_API_KEY;
+  if (!apiKey) return { lpLocked: null, lpBurned: null };
+
+  try {
+    const res = await fetchWithRetry(
+      `${BIRDEYE_BASE}/defi/token_security?address=${mintAddress}`,
+      { headers: { "X-API-KEY": apiKey, "x-chain": "solana" }, next: { revalidate: 300 } }
+    );
+    if (!res.ok) return { lpLocked: null, lpBurned: null };
+
+    const json = await res.json();
+    const d = json.data ?? {};
+
+    const lockedPct: number | undefined =
+      d.lockInfo?.percent ?? d.lpLockedPct ?? d.top10LPHolderPercent ?? undefined;
+    const burnedPct: number | undefined =
+      d.lpBurnedPct ?? d.burnPct ?? d.lockInfo?.burnedPercent ?? undefined;
+
+    return {
+      lpLocked: typeof lockedPct === "number" ? lockedPct > 50 : null,
+      lpBurned: typeof burnedPct === "number" ? burnedPct > 50 : null,
+    };
+  } catch (err) {
+    console.error(`[birdeye] getLpSecurity threw for ${mintAddress}:`, err);
+    return { lpLocked: null, lpBurned: null };
+  }
+}
+
 export interface Candle {
   time: number; // unix seconds
   open: number;
@@ -298,7 +342,6 @@ export async function getCandles(
     `${BIRDEYE_BASE}/defi/v3/ohlcv?address=${mintAddress}&type=${typeMap[timeframe]}&currency=usd&time_from=${from}&time_to=${now}`,
     { headers: { "X-API-KEY": apiKey, "x-chain": "solana" }, next: { revalidate: 30 } }
   );
-  
   if (!res.ok) {
     console.error(`[birdeye] getCandles failed: ${res.status} ${res.statusText}`);
     return [];

@@ -35,6 +35,14 @@ export function shortenAddress(address: string, chars = 4): string {
   return `${address.slice(0, chars)}…${address.slice(-chars)}`;
 }
 
+/**
+ * Signal feed retention cap. The discovery background job prunes signals
+ * beyond this count (oldest first) so the feed stays fresh instead of
+ * growing forever — the feed page's query should match this so what's
+ * shown lines up with what the DB actually retains.
+ */
+export const FEED_SIGNAL_CAP = 60;
+
 /** Map a 0-100 rug score to a risk bucket used for badges + colors. */
 export function riskLevelFromScore(score: number): "LOW" | "MEDIUM" | "HIGH" | "EXTREME" {
   if (score < 25) return "LOW";
