@@ -29,6 +29,19 @@ export async function GET(req: NextRequest) {
     });
   }
 
+  // Fetch Raydium's raw response directly here (rather than going through
+  // getRaydiumLpMint) so we can see exactly what they returned — whether
+  // it's a clean "pool not found," an unexpected shape, or something else.
+  let raydiumRaw: unknown = null;
+  try {
+    const raydiumRes = await fetch(
+      `https://api-v3.raydium.io/pools/info/ids?ids=${pairInfo.pairAddress}`
+    );
+    raydiumRaw = await raydiumRes.json();
+  } catch (err) {
+    raydiumRaw = { fetchError: String(err) };
+  }
+
   const lpMint = await getRaydiumLpMint(pairInfo.pairAddress);
   if (!lpMint) {
     return NextResponse.json({
@@ -36,6 +49,7 @@ export async function GET(req: NextRequest) {
       pairAddress: pairInfo.pairAddress,
       dexId: pairInfo.dexId,
       note: "Raydium's API didn't return an lpMint for this pool — either the pool ID is stale/wrong, or the response shape differs from expected.",
+      raydiumRawResponse: raydiumRaw,
     });
   }
 
