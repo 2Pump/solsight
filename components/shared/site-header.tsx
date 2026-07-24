@@ -46,7 +46,7 @@ export function SiteHeader() {
               {isApp ? "" : "View live feed"}
             </Link>
             <Button asChild size="sm" className={cn(isApp && "hidden")}>
-              <Link href="/dashboard">Launch App</Link>
+              <Link href="/feed">Launch App</Link>
             </Button>
           </div>
         </div>

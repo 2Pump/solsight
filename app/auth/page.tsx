@@ -2,7 +2,6 @@
 
 import { useState } from "react";
 import { signIn } from "next-auth/react";
-import { useRouter } from "next/navigation";
 import { usePrivy, useWallets } from "@privy-io/react-auth";
 import { Button } from "@/components/ui/button";
 import { RadarMark } from "@/components/shared/radar-mark";
@@ -10,7 +9,6 @@ import { Wallet, Loader2, AlertTriangle } from "lucide-react";
 import bs58 from "bs58";
 
 export default function AuthPage() {
-  const router = useRouter();
   const { login, ready } = usePrivy();
   const { wallets } = useWallets();
   const [status, setStatus] = useState<"idle" | "signing" | "verifying">("idle");
@@ -71,11 +69,15 @@ export default function AuthPage() {
         return;
       }
 
-      // Success — navigate explicitly and force a refresh so the session
-      // (and anything gated on it, like the dashboard) picks up immediately
-      // rather than waiting on a stale client-side session cache.
-      router.push("/dashboard");
-      router.refresh();
+      // A full page navigation here (not router.push) is deliberate: right
+      // after a credentials sign-in with redirect: false, the session
+      // cookie can take a moment to fully commit in the browser. A
+      // client-side router.push can occasionally race ahead of that and
+      // land on the dashboard before the server sees the new session,
+      // showing the sign-in wall again — which looks exactly like "nothing
+      // happened." A hard navigation guarantees the fresh cookie is sent
+      // with the very next request.
+      window.location.href = "/dashboard";
     } catch (err) {
       console.error("[auth] signIn threw:", err);
       setError("Something went wrong completing sign-in. Please try again.");
