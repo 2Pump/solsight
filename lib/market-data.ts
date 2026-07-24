@@ -254,17 +254,21 @@ export interface Candle {
   volume: number;
 }
 
+export type CandleTimeframe = "1s" | "1m" | "5m" | "15m" | "1h" | "4h" | "1d";
+
 export async function getCandles(
   mintAddress: string,
-  timeframe: "1m" | "5m" | "15m" | "1h" | "4h" | "1d" = "15m"
+  timeframe: CandleTimeframe = "15m"
 ): Promise<Candle[]> {
   const apiKey = process.env.BIRDEYE_API_KEY;
   if (!apiKey) return [];
 
   // Birdeye's OHLCV "type" values use uppercase for hour/day/week/month
-  // granularities (1H, 1D) but lowercase for minutes (1m, 15m) — this maps
-  // our simpler lowercase timeframe values to what their API actually expects.
-  const typeMap: Record<string, string> = {
+  // granularities (1H, 1D) but lowercase for minutes and seconds (1s, 1m,
+  // 15m) — this maps our simpler lowercase timeframe values to what their
+  // API actually expects.
+  const typeMap: Record<CandleTimeframe, string> = {
+    "1s": "1s",
     "1m": "1m",
     "5m": "5m",
     "15m": "15m",
@@ -273,13 +277,28 @@ export async function getCandles(
     "1d": "1D",
   };
 
+  // Birdeye caps OHLCV responses at 5000 records — a flat 3-day lookback
+  // window would ask for ~259,200 candles at 1s granularity, blowing well
+  // past that cap (and being pointless to render anyway). Scale the
+  // requested window to the timeframe instead.
+  const lookbackSeconds: Record<CandleTimeframe, number> = {
+    "1s": 60 * 30, // 30 minutes
+    "1m": 60 * 60 * 12, // 12 hours
+    "5m": 60 * 60 * 24 * 3, // 3 days
+    "15m": 60 * 60 * 24 * 3, // 3 days
+    "1h": 60 * 60 * 24 * 14, // 14 days
+    "4h": 60 * 60 * 24 * 30, // 30 days
+    "1d": 60 * 60 * 24 * 180, // 180 days
+  };
+
   const now = Math.floor(Date.now() / 1000);
-  const from = now - 60 * 60 * 24 * 3; // last 3 days
+  const from = now - lookbackSeconds[timeframe];
 
   const res = await fetchWithRetry(
     `${BIRDEYE_BASE}/defi/v3/ohlcv?address=${mintAddress}&type=${typeMap[timeframe]}&currency=usd&time_from=${from}&time_to=${now}`,
     { headers: { "X-API-KEY": apiKey, "x-chain": "solana" }, next: { revalidate: 30 } }
   );
+  
   if (!res.ok) {
     console.error(`[birdeye] getCandles failed: ${res.status} ${res.statusText}`);
     return [];

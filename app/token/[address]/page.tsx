@@ -1,4 +1,4 @@
-import { PriceChart } from "@/components/charts/price-chart";
+import { PriceChartPanel } from "@/components/charts/price-chart-panel";
 import { AiAnalysisPanel } from "@/components/dashboard/ai-analysis-panel";
 import { RiskPanel } from "@/components/dashboard/risk-panel";
 import { AddToWatchlistButton } from "@/components/dashboard/add-to-watchlist-button";
@@ -125,9 +125,11 @@ export default async function TokenDetailPage({
         <div className="grid gap-6 lg:grid-cols-[1fr_340px]">
           <div className="flex flex-col gap-6">
             <div className="glass p-4">
-              {hasChartHistory ? (
-                <PriceChart
-                  candles={candles}
+             {hasChartHistory ? (
+                <PriceChartPanel
+                  mintAddress={address}
+                  initialTimeframe="15m"
+                  initialCandles={candles}
                   keyLevels={
                     analysis
                       ? analysis.keyLevels.map((l) => ({ label: l.label, price: l.price }))

@@ -3,21 +3,26 @@
 import { useEffect, useRef, useState } from "react";
 import { createChart, ColorType, type IChartApi } from "lightweight-charts";
 import type { Candle } from "@/lib/market-data";
+import { RefreshCw } from "lucide-react";
 
 interface KeyLevel {
   label: string;
   price: number;
 }
 
-export function PriceChart({ candles, keyLevels = [] }: { candles: Candle[]; keyLevels?: KeyLevel[] }) {
+export function PriceChart({
+  candles,
+  keyLevels = [],
+  showSeconds = false,
+}: {
+  candles: Candle[];
+  keyLevels?: KeyLevel[];
+  /** Show seconds on the time axis — relevant for 1s-granularity charts. */
+  showSeconds?: boolean;
+}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const [isEmpty, setIsEmpty] = useState(false);
-  const [emptyDebugInfo, setEmptyDebugInfo] = useState<{
-    raw: number;
-    cleaned: number;
-    sample: string;
-  } | null>(null);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -43,11 +48,31 @@ export function PriceChart({ candles, keyLevels = [] }: { candles: Candle[]; key
         horzLines: { color: "rgba(255,255,255,0.06)" },
       },
       rightPriceScale: { borderColor: "rgba(255,255,255,0.08)" },
-      timeScale: { borderColor: "rgba(255,255,255,0.08)" },
+      timeScale: {
+        borderColor: "rgba(255,255,255,0.08)",
+        timeVisible: true,
+        secondsVisible: showSeconds,
+      },
       crosshair: {
         vertLine: { color: "#7C5CFF", labelBackgroundColor: "#7C5CFF" },
         horzLine: { color: "#7C5CFF", labelBackgroundColor: "#7C5CFF" },
       },
+      // Explicit scroll/zoom config (these match lightweight-charts'
+      // defaults, but spelled out so it's clear it's deliberate and easy
+      // to tune later): drag to pan, mouse wheel / pinch to zoom, drag the
+      // price/time axis to scale.
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: true,
+      },
+      handleScale: {
+        axisPressedMouseMove: true,
+        mouseWheel: true,
+        pinch: true,
+      },
+      kineticScroll: { touch: true, mouse: false },
     });
 
     const resizeObserver = new ResizeObserver((entries) => {
@@ -71,12 +96,6 @@ export function PriceChart({ candles, keyLevels = [] }: { candles: Candle[]; key
     //     fields as strings, which Number.isFinite() silently rejects,
     //     quietly dropping every candle with no error.
     //  2. Detect millisecond-scale timestamps and convert to seconds.
-    //     lightweight-charts expects UTCTimestamp in *seconds*; if a
-    //     provider ever hands back milliseconds, every candle gets placed
-    //     thousands of years apart, which visually collapses the whole
-    //     series into an invisible sliver at one edge of the time axis —
-    //     the chart frame/axes still render fine, but no candles are
-    //     visible anywhere, which matches what we were seeing.
     //  3. Sort ascending and drop duplicate timestamps — lightweight-charts
     //     requires strictly ascending, unique times or it throws internally.
     const cleaned = candles
@@ -120,14 +139,6 @@ export function PriceChart({ candles, keyLevels = [] }: { candles: Candle[]; key
       });
     }
 
-    // TEMP DIAGNOSTIC — shows in the UI itself so we can see exactly where
-    // candles are being lost without needing devtools. Remove once resolved.
-    setEmptyDebugInfo({
-      raw: candles.length,
-      cleaned: cleaned.length,
-      sample: candles[0] ? JSON.stringify(candles[0]) : "no candles received",
-    });
-
     setIsEmpty(cleaned.length === 0);
 
     series.setData(
@@ -158,24 +169,23 @@ export function PriceChart({ candles, keyLevels = [] }: { candles: Candle[]; key
       resizeObserver.disconnect();
       chart.remove();
     };
-  }, [candles, keyLevels]);
+  }, [candles, keyLevels, showSeconds]);
 
   return (
     <div className="relative h-[420px] w-full">
       <div ref={containerRef} className="h-full w-full" />
+      {!isEmpty && (
+        <button
+          onClick={() => chartRef.current?.timeScale().fitContent()}
+          title="Reset zoom"
+          className="absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-lg border border-border bg-surface-2/80 text-ink-faint backdrop-blur hover:text-ink"
+        >
+          <RefreshCw className="h-3.5 w-3.5" />
+        </button>
+      )}
       {isEmpty && (
-        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-1 px-4 text-center text-sm text-ink-faint">
-          <span>No chart data could be rendered for this token.</span>
-          {emptyDebugInfo && (
-            <>
-              <span className="font-mono text-xs opacity-70">
-                (received {emptyDebugInfo.raw} candles from the server, {emptyDebugInfo.cleaned} passed validation)
-              </span>
-              <span className="mt-2 max-w-full break-all font-mono text-xs opacity-70">
-                sample candle: {emptyDebugInfo.sample}
-              </span>
-            </>
-          )}
+        <div className="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-ink-faint">
+          No chart data could be rendered for this token.
         </div>
       )}
     </div>
