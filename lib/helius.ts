@@ -10,8 +10,12 @@
  * this function comes back unflagged until real detection logic is built.
  */
 
+import { PublicKey } from "@solana/web3.js";
+
 const HELIUS_ENHANCED_BASE = "https://api-mainnet.helius-rpc.com/v0";
 const HELIUS_WALLET_API_BASE = "https://api.helius.xyz/v1";
+
+const PUMPSWAP_PROGRAM_ID = new PublicKey("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA");
 
 function heliusRpcUrl(apiKey: string) {
   return `https://mainnet.helius-rpc.com/?api-key=${apiKey}`;
@@ -304,4 +308,66 @@ export async function checkLpBurnStatus(lpMint: string): Promise<LpBurnCheckResu
   }
 
   return { lpSupply: uiAmount, lpBurned: uiAmount === 0 };
+}
+
+export interface PumpSwapLpInfo {
+  /** The derived LP mint address — always present if PDA derivation succeeds, even if unverified. Check `verified` before trusting it. */
+  lpMint: string | null;
+  /** True only after confirming the derived address actually decodes as a real, initialized mint account on-chain — not just a syntactically valid address. */
+  verified: boolean;
+  note: string | null;
+}
+
+/**
+ * Derives a PumpSwap pool's LP mint address via PDA (no external API call
+ * needed — the address is deterministic). PumpSwap pools use Token-2022
+ * (not the older SPL Token program) for LP tokens, with each pool's LP
+ * mint derived from seeds ["pool_lp_mint", poolAddress] under the
+ * PumpSwap program (pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA).
+ *
+ * IMPORTANT — this has NOT been confirmed against a live PumpSwap pool
+ * yet. Unlike the Raydium path (verified end-to-end against Solscan), this
+ * is a first attempt based on public documentation of PumpSwap's account
+ * structure, not live-tested. It self-checks by confirming the derived
+ * address actually decodes as a real mint account before returning
+ * verified: true — if the seeds or program ID assumption is wrong, this
+ * will honestly report verified: false rather than silently returning a
+ * bogus address. Do not trust lpMint here for anything real until a
+ * verified: true result has also been manually cross-checked (e.g. on
+ * Solscan), same as was done for the Raydium path.
+ */
+export async function getPumpSwapLpMint(poolAddress: string): Promise<PumpSwapLpInfo> {
+  const apiKey = process.env.HELIUS_API_KEY;
+  if (!apiKey) return { lpMint: null, verified: false, note: "HELIUS_API_KEY not set" };
+
+  let derivedMint: PublicKey;
+  try {
+    const poolPubkey = new PublicKey(poolAddress);
+    [derivedMint] = PublicKey.findProgramAddressSync(
+      [Buffer.from("pool_lp_mint"), poolPubkey.toBuffer()],
+      PUMPSWAP_PROGRAM_ID
+    );
+  } catch (err) {
+    return { lpMint: null, verified: false, note: `PDA derivation failed: ${err}` };
+  }
+
+  // Confirm the derived address is actually a real, initialized mint
+  // account before trusting it — PDA derivation always produces *a*
+  // syntactically valid address whether or not the seeds/program
+  // assumption is correct, so this check is what separates "we computed
+  // something" from "we computed the right thing."
+  const accountInfo = await heliusRpc<{
+    value: { data: { parsed?: { type: string; info: Record<string, unknown> } }; owner: string } | null;
+  }>("getAccountInfo", [derivedMint.toBase58(), { encoding: "jsonParsed" }], apiKey);
+
+  const parsed = accountInfo?.value?.data?.parsed;
+  if (!parsed || parsed.type !== "mint") {
+    return {
+      lpMint: derivedMint.toBase58(),
+      verified: false,
+      note: "Derived address doesn't decode as a real mint account — the PDA seeds/program assumption may be wrong",
+    };
+  }
+
+  return { lpMint: derivedMint.toBase58(), verified: true, note: null };
 }

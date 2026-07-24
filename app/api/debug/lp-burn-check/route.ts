@@ -1,13 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPrimaryPairInfo, getRaydiumPoolLpInfo } from "@/lib/market-data";
-import { checkLpBurnStatus } from "@/lib/helius";
+import { checkLpBurnStatus, getPumpSwapLpMint } from "@/lib/helius";
 
 /**
  * TEMPORARY debug route — GET /api/debug/lp-burn-check?address=<mint>
  *
- * Returns the real Raydium-reported lpMint plus its on-chain supply, so
- * this can be spot-checked against Solscan before being trusted anywhere
- * near the actual rug score. Delete this route once verified.
+ * Covers Raydium (verified, live in production) and PumpSwap (new,
+ * unverified — this route exists specifically to check it before it's
+ * wired into anything real). Delete once PumpSwap is verified or dropped.
  */
 export async function GET(req: NextRequest) {
   const address = req.nextUrl.searchParams.get("address");
@@ -20,46 +20,74 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "No trading pair found for this token on Dexscreener" }, { status: 404 });
   }
 
-  if (pairInfo.dexId !== "raydium") {
+  if (pairInfo.dexId === "pumpfun") {
     return NextResponse.json({
       tokenAddress: address,
       pairAddress: pairInfo.pairAddress,
       dexId: pairInfo.dexId,
-      note: `This token's primary pool is on ${pairInfo.dexId}, not Raydium — this check only supports Raydium pools right now.`,
+      note: "Still on pump.fun's bonding curve — hasn't graduated to a real AMM pool yet, so there's no LP token to check at all. Not a failure, just a different lifecycle stage.",
     });
   }
 
-  const poolInfo = await getRaydiumPoolLpInfo(pairInfo.pairAddress);
+  if (pairInfo.dexId === "pumpswap") {
+    const lpInfo = await getPumpSwapLpMint(pairInfo.pairAddress);
+    if (!lpInfo.verified) {
+      return NextResponse.json({
+        tokenAddress: address,
+        pairAddress: pairInfo.pairAddress,
+        dexId: pairInfo.dexId,
+        derivedLpMint: lpInfo.lpMint,
+        verified: false,
+        note: lpInfo.note,
+      });
+    }
+    const burnStatus = await checkLpBurnStatus(lpInfo.lpMint!);
+    return NextResponse.json({
+      tokenAddress: address,
+      pairAddress: pairInfo.pairAddress,
+      dexId: pairInfo.dexId,
+      lpMint: lpInfo.lpMint,
+      verified: true,
+      ...burnStatus,
+      verifyHint: `Cross-check: open https://solscan.io/token/${lpInfo.lpMint} on Solscan — does it look like a PumpSwap LP token, and does its supply match ${burnStatus.lpSupply}?`,
+    });
+  }
 
-  if (poolInfo.poolType === "Concentrated") {
+  if (pairInfo.dexId === "raydium") {
+    const poolInfo = await getRaydiumPoolLpInfo(pairInfo.pairAddress);
+    if (poolInfo.poolType === "Concentrated") {
+      return NextResponse.json({
+        tokenAddress: address,
+        pairAddress: pairInfo.pairAddress,
+        dexId: pairInfo.dexId,
+        poolType: poolInfo.poolType,
+        note: "Raydium CLMM pool — uses per-position NFTs, not one fungible LP token, so there's no single supply to check.",
+      });
+    }
+    if (!poolInfo.lpMint) {
+      return NextResponse.json({
+        tokenAddress: address,
+        pairAddress: pairInfo.pairAddress,
+        dexId: pairInfo.dexId,
+        note: "Raydium's API didn't return an lpMint for this pool.",
+      });
+    }
+    const burnStatus = await checkLpBurnStatus(poolInfo.lpMint);
     return NextResponse.json({
       tokenAddress: address,
       pairAddress: pairInfo.pairAddress,
       dexId: pairInfo.dexId,
       poolType: poolInfo.poolType,
-      note: "This is a Raydium CLMM (Concentrated Liquidity) pool — liquidity is represented as per-position NFTs, not one fungible LP token, so there's no single supply to check for zero. This detection method only supports Standard (constant-product) pools right now.",
+      lpMint: poolInfo.lpMint,
+      ...burnStatus,
+      verifyHint: `Cross-check: open https://solscan.io/token/${poolInfo.lpMint} on Solscan.`,
     });
   }
-
-  if (!poolInfo.lpMint) {
-    return NextResponse.json({
-      tokenAddress: address,
-      pairAddress: pairInfo.pairAddress,
-      dexId: pairInfo.dexId,
-      poolType: poolInfo.poolType,
-      note: "Raydium's API didn't return an lpMint for this pool — either the pool ID is stale/wrong, or the response shape differs from expected.",
-    });
-  }
-
-  const burnStatus = await checkLpBurnStatus(poolInfo.lpMint);
 
   return NextResponse.json({
     tokenAddress: address,
     pairAddress: pairInfo.pairAddress,
     dexId: pairInfo.dexId,
-    poolType: poolInfo.poolType,
-    lpMint: poolInfo.lpMint,
-    ...burnStatus,
-    verifyHint: `Cross-check: open https://solscan.io/token/${poolInfo.lpMint} on Solscan — does it look like an LP token, and does its supply match ${burnStatus.lpSupply}?`,
+    note: `${pairInfo.dexId} isn't supported by this check yet (Meteora is next up).`,
   });
 }
