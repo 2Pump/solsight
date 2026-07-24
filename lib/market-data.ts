@@ -205,9 +205,9 @@ export interface PrimaryPairInfo {
  * Finds a token's primary (highest-liquidity) trading pair via Dexscreener's
  * public API — used to identify which DEX/pool holds a token's liquidity,
  * as a prerequisite for on-chain LP burn verification (see
- * lib/helius.ts's getRaydiumLpBurnStatus). Dexscreener's official API
- * doesn't expose lock/burn status itself, only pair identity — the actual
- * burn check has to be done on-chain.
+ * getRaydiumLpMint below and lib/helius.ts's checkLpBurnStatus).
+ * Dexscreener's official API doesn't expose lock/burn status itself, only
+ * pair identity — the actual burn check happens separately.
  */
 export async function getPrimaryPairInfo(mintAddress: string): Promise<PrimaryPairInfo | null> {
   const res = await fetch(`${DEXSCREENER_BASE}/latest/dex/tokens/${mintAddress}`, {
@@ -230,6 +230,37 @@ export async function getPrimaryPairInfo(mintAddress: string): Promise<PrimaryPa
   if (!top?.pairAddress || !top?.dexId) return null;
 
   return { pairAddress: String(top.pairAddress), dexId: String(top.dexId) };
+}
+
+/**
+ * Looks up a Raydium pool's real LP mint address via Raydium's own public
+ * API (api-v3.raydium.io) — no API key required, no binary account
+ * decoding needed. This replaces an earlier approach that tried to decode
+ * the pool's raw on-chain account at a guessed byte offset, which turned
+ * out to be unreliable: Raydium has multiple pool account layouts (classic
+ * AMM v4, newer CPMM, CLMM) and a single hardcoded offset doesn't work
+ * across all of them — verified wrong against a real pool during testing
+ * (decoded to the System Program's null address instead of a real mint).
+ * Raydium's own API abstracts that away entirely, which is why this is
+ * the more reliable path.
+ */
+export async function getRaydiumLpMint(pairAddress: string): Promise<string | null> {
+  try {
+    const res = await fetch(
+      `https://api-v3.raydium.io/pools/info/ids?ids=${pairAddress}`,
+      { next: { revalidate: 300 } }
+    );
+    if (!res.ok) return null;
+
+    const json = await res.json();
+    if (json.success === false) return null;
+
+    const pool = json.data?.[0];
+    return pool?.lpMint?.address ?? pool?.lpMint ?? null;
+  } catch (err) {
+    console.error(`[raydium] getRaydiumLpMint threw for ${pairAddress}:`, err);
+    return null;
+  }
 }
 
 export interface TokenSearchResult {

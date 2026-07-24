@@ -10,8 +10,6 @@
  * this function comes back unflagged until real detection logic is built.
  */
 
-import bs58 from "bs58";
-
 const HELIUS_ENHANCED_BASE = "https://api-mainnet.helius-rpc.com/v0";
 const HELIUS_WALLET_API_BASE = "https://api.helius.xyz/v1";
 
@@ -275,66 +273,24 @@ export async function getMintSafety(mintAddress: string): Promise<MintSafety> {
   return { mintAuthorityRevoked, freezeAuthorityRevoked, topHolderPct };
 }
 
-export interface RaydiumLpBurnResult {
-  /** The pool's LP token mint address, decoded from raw on-chain account data. Included so this can be independently cross-checked (e.g. on Solscan) before being trusted. */
-  lpMint: string | null;
-  /** The LP mint's current total supply. Zero means every LP token has been burned — Dexscreener's own "padlock" badge is determined the same way. */
+export interface LpBurnCheckResult {
   lpSupply: number | null;
   lpBurned: boolean | null;
-  /** Explains why a result couldn't be determined, for debugging. */
-  note: string | null;
 }
 
 /**
- * Decodes a Raydium AMM v4 pool account to find its LP mint, then checks
- * whether that mint's supply is zero (fully burned).
- *
- * IMPORTANT — this uses a fixed byte offset (464) for the lpMint field
- * within Raydium's AMM v4 account layout, based on their commonly
- * referenced public struct layout. This has NOT been verified against a
- * live account from this environment (no network access to Solana RPC
- * here) — the returned `lpMint` is deliberately included in the result so
- * it can be manually cross-checked (e.g. does it show up as an LP token
- * for the right pool on Solscan?) before this is trusted anywhere near the
- * rug score. Raydium-only for now — other AMMs (Orca, Meteora, pump.fun's
- * bonding curve) use different account layouts and aren't supported here.
+ * Checks whether an LP mint's total supply is zero (fully burned) — the
+ * same mechanism Dexscreener's own "padlock" badge uses. This is a plain,
+ * well-established RPC method (getTokenSupply) with no guesswork involved,
+ * unlike an earlier approach that tried to decode a pool's raw account
+ * data at a hardcoded byte offset — that turned out to be unreliable
+ * across Raydium's different pool layouts. Getting the correct lpMint to
+ * pass in here is handled separately via Raydium's own public API (see
+ * getRaydiumLpMint in lib/market-data.ts).
  */
-export async function getRaydiumLpBurnStatus(pairAddress: string): Promise<RaydiumLpBurnResult> {
+export async function checkLpBurnStatus(lpMint: string): Promise<LpBurnCheckResult> {
   const apiKey = process.env.HELIUS_API_KEY;
-  if (!apiKey) {
-    return { lpMint: null, lpSupply: null, lpBurned: null, note: "HELIUS_API_KEY not set" };
-  }
-
-  const accountInfo = await heliusRpc<{
-    value: { data: [string, string]; owner: string } | null;
-  }>("getAccountInfo", [pairAddress, { encoding: "base64" }], apiKey);
-
-  const raw = accountInfo?.value?.data?.[0];
-  if (!raw) {
-    return {
-      lpMint: null,
-      lpSupply: null,
-      lpBurned: null,
-      note: "Could not read pool account — may not be a Raydium AMM v4 pool",
-    };
-  }
-
-  const buf = Buffer.from(raw, "base64");
-  // Raydium AMM v4 state account is 752 bytes; lpMint is a 32-byte pubkey
-  // starting at byte offset 464 (after status/config fields, baseVault,
-  // quoteVault, baseMint, quoteMint).
-  const LP_MINT_OFFSET = 464;
-  if (buf.length < LP_MINT_OFFSET + 32) {
-    return {
-      lpMint: null,
-      lpSupply: null,
-      lpBurned: null,
-      note: `Account too small (${buf.length} bytes) — likely not a Raydium AMM v4 pool`,
-    };
-  }
-
-  const lpMintBytes = buf.subarray(LP_MINT_OFFSET, LP_MINT_OFFSET + 32);
-  const lpMint = bs58.encode(lpMintBytes);
+  if (!apiKey) return { lpSupply: null, lpBurned: null };
 
   const supplyResult = await heliusRpc<{ value: { amount: string; uiAmount: number | null } }>(
     "getTokenSupply",
@@ -344,13 +300,8 @@ export async function getRaydiumLpBurnStatus(pairAddress: string): Promise<Raydi
 
   const uiAmount = supplyResult?.value?.uiAmount;
   if (uiAmount === undefined || uiAmount === null) {
-    return {
-      lpMint,
-      lpSupply: null,
-      lpBurned: null,
-      note: "Decoded an lpMint but couldn't read its supply — decoded address may be wrong",
-    };
+    return { lpSupply: null, lpBurned: null };
   }
 
-  return { lpMint, lpSupply: uiAmount, lpBurned: uiAmount === 0, note: null };
+  return { lpSupply: uiAmount, lpBurned: uiAmount === 0 };
 }
