@@ -6,12 +6,19 @@ import { AddToWatchlistButton } from "@/components/dashboard/add-to-watchlist-bu
 import { formatCompact, formatUsd, formatPct, formatSymbol, shortenAddress } from "@/lib/utils";
 import { ExternalLink, AlertTriangle } from "lucide-react";
 import Link from "next/link";
-import { getTokenOverview, getCandles, heuristicRugScore } from "@/lib/market-data";
+import { getTokenOverview, getCandles, heuristicRugScore, type CandleTimeframe } from "@/lib/market-data";
 import { getMintSafety } from "@/lib/helius";
 import { getMultiTimeframeRsi } from "@/lib/technical-analysis";
 import { analyzeChart } from "@/lib/anthropic";
 import { auth } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
 import { redirect } from "next/navigation";
+
+// Must match the timeframe options the settings page actually offers (see
+// components/dashboard/settings-manager.tsx) — anything else stored in the
+// DB (shouldn't happen, since the settings API validates against this same
+// list, but a defensive fallback here costs nothing) falls back to 15m.
+const VALID_TIMEFRAMES = new Set(["1s", "1m", "5m", "15m", "1h", "4h", "1d"]);
 
 export const revalidate = 30; // refresh market data at most every 30s
 
@@ -22,15 +29,28 @@ export default async function TokenDetailPage({
 }) {
   const session = await auth();
   if (!session?.user) redirect("/auth");
+  const userId = (session.user as { id: string }).id;
 
   const { address } = await params;
+
+  // Real per-user preference, not a hardcoded default — a user who's set a
+  // different default timeframe in Settings actually sees it here.
+  const settings = await prisma.userSettings.findUnique({
+    where: { userId },
+    select: { defaultTimeframe: true },
+  });
+  const timeframe = (
+    settings?.defaultTimeframe && VALID_TIMEFRAMES.has(settings.defaultTimeframe)
+      ? settings.defaultTimeframe
+      : "15m"
+  ) as CandleTimeframe;
 
   // Real market data — falls back from Birdeye to Dexscreener automatically
   // (see lib/market-data.ts). Returns null if the token can't be found on
   // either provider.
   const [overview, candles, mintSafety] = await Promise.all([
     getTokenOverview(address),
-    getCandles(address, "15m"),
+    getCandles(address, timeframe),
     getMintSafety(address),
   ]);
 
@@ -64,7 +84,7 @@ export default async function TokenDetailPage({
         mintAddress: address,
         symbol: overview!.symbol,
         candles: candles.map((c) => ({
-          timeframe: "15m",
+          timeframe,
           open: c.open,
           high: c.high,
           low: c.low,
@@ -143,7 +163,7 @@ export default async function TokenDetailPage({
               {hasChartHistory ? (
                 <PriceChartPanel
                   mintAddress={address}
-                  initialTimeframe="15m"
+                  initialTimeframe={timeframe}
                   initialCandles={candles}
                   keyLevels={
                     analysis

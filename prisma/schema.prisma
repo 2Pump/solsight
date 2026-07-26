@@ -40,6 +40,7 @@ model User {
   comments     SignalComment[]
   trackedWallets TrackedWallet[]
   alerts       Alert[]
+  settings     UserSettings?
 
   @@index([walletAddress])
 }
@@ -121,6 +122,7 @@ model Token {
   watchlistItems  WatchlistItem[]
   chartAnnotations ChartAnnotation[]
   mentions        SocialMention[]
+  alerts          Alert[]
 
   @@index([symbol])
   @@index([rugScore])
@@ -242,7 +244,8 @@ model TrackedWallet {
   label     String?
   createdAt DateTime @default(now())
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user   User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  alerts Alert[]
 
   @@unique([userId, address])
 }
@@ -300,16 +303,67 @@ model SocialMention {
 }
 
 // ─────────────────────────────────────────────────────────
-// User alerts / notification preferences
+// User alerts — real, structured alert rules tied to a
+// watchlist token or a tracked wallet
 // ─────────────────────────────────────────────────────────
 
+enum AlertType {
+  PRICE_ABOVE // fires when a watchlist token's price crosses above thresholdUsd
+  PRICE_BELOW // fires when a watchlist token's price crosses below thresholdUsd
+  LARGE_TRANSACTION // fires when a tracked wallet moves more than thresholdUsd in one transaction
+  WALLET_ACTIVITY // fires on any buy/sell/transfer from a tracked wallet, no threshold needed
+}
+
 model Alert {
-  id        String   @id @default(cuid())
-  userId    String
-  type      String   // "watchlist_signal" | "rug_warning" | "wallet_move"
-  channel   String   // "web" | "discord"
-  active    Boolean  @default(true)
+  id     String    @id @default(cuid())
+  userId String
+  type   AlertType
+
+  // Exactly one of these two is set, depending on `type` — enforced at the
+  // application layer (Prisma doesn't support a clean DB-level XOR
+  // constraint here) rather than in the schema itself.
+  tokenId         String?
+  trackedWalletId String?
+
+  // Used by PRICE_ABOVE / PRICE_BELOW (a USD price level) and
+  // LARGE_TRANSACTION (a USD transaction-size floor). Null for
+  // WALLET_ACTIVITY, which has no threshold — it just watches for any
+  // movement at all.
+  thresholdUsd Float?
+
+  active          Boolean   @default(true)
+  lastTriggeredAt DateTime?
+  createdAt       DateTime  @default(now())
+
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  token         Token?         @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+  trackedWallet TrackedWallet? @relation(fields: [trackedWalletId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenId])
+  @@index([trackedWalletId])
+}
+
+// ─────────────────────────────────────────────────────────
+// Per-user settings / notification preferences
+// ─────────────────────────────────────────────────────────
+
+model UserSettings {
+  id     String @id @default(cuid())
+  userId String @unique
+
+  // Mirrors the timeframe options actually offered by the chart's own
+  // switcher (see components/charts/price-chart-panel.tsx) — kept as a
+  // plain string rather than an enum so the two stay easy to keep in sync
+  // without a migration if the chart ever adds a timeframe.
+  defaultTimeframe String @default("15m")
+
+  notifyRugWarnings    Boolean @default(true)
+  notifyWalletActivity Boolean @default(true)
+  notifySignals        Boolean @default(true)
+
   createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 }

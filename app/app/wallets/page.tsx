@@ -1,44 +1,34 @@
-import Link from "next/link";
-import { ExternalLink } from "lucide-react";
-import { shortenAddress } from "@/lib/utils";
-import { WalletSearchBar } from "@/components/dashboard/wallet-search-bar";
+import { auth } from "@/lib/auth";
+import { prisma } from "@/lib/prisma";
+import { TrackedWalletsManager } from "@/components/dashboard/tracked-wallets-manager";
 
-// Sample data — in production this reads the signed-in user's TrackedWallet
-// rows from Prisma. Shown here so the page is meaningful before that's wired up.
-const TRACKED = [
-  { address: "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin", label: "Early WIF buyer" },
-  { address: "3kLmT4zP2yGh8vDxNqW1sJfR7cVbXoAe6yUiHm5aQ9wZ", label: "Flagged — repeat rugger" },
-];
+export const revalidate = 0; // always reflect the current signed-in user's real tracked wallets
 
-export default function TrackedWalletsPage() {
+// Auth is already guaranteed by app/app/layout.tsx — no inline sign-in
+// check needed here, same as the watchlist page.
+export default async function TrackedWalletsPage() {
+  const session = await auth();
+  const userId = (session!.user as { id: string }).id;
+
+  // Real Prisma read — no sample/hardcoded rows. A brand-new account sees
+  // a genuine empty state, not fake wallets.
+  const wallets = await prisma.trackedWallet.findMany({
+    where: { userId },
+    orderBy: { createdAt: "desc" },
+    select: { id: true, address: true, label: true },
+  });
+
   return (
     <div>
       <div className="mb-6">
         <h1 className="font-display text-2xl font-semibold text-ink">Tracked Wallets</h1>
         <p className="mt-1 text-sm text-ink-muted">
-          Get notified when these wallets move funds or open new positions.
+          {wallets.length} wallet{wallets.length === 1 ? "" : "s"} tracked. Set up alerts for these
+          on the Alerts page.
         </p>
       </div>
 
-      <div className="mb-6">
-        <WalletSearchBar />
-      </div>
-
-      <div className="glass divide-y divide-border">
-        {TRACKED.map((w) => (
-          <Link
-            key={w.address}
-            href={`/wallet/${w.address}`}
-            className="flex items-center justify-between px-5 py-4 transition-colors hover:bg-white/5"
-          >
-            <div>
-              <div className="font-mono text-sm text-ink">{shortenAddress(w.address, 6)}</div>
-              <div className="text-xs text-ink-faint">{w.label}</div>
-            </div>
-            <ExternalLink className="h-4 w-4 text-ink-faint" />
-          </Link>
-        ))}
-      </div>
+      <TrackedWalletsManager initialWallets={wallets} />
     </div>
   );
 }
