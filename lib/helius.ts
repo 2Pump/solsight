@@ -1,0 +1,373 @@
+/**
+ * Helius API client — Enhanced Transactions (fund-flow), Solana JSON-RPC
+ * (mint safety / holder concentration), and Wallet balances.
+ *
+ * Important honesty note: this gives you real fund-flow and on-chain data —
+ * it does NOT do insider-cluster detection, wash-trading detection, or
+ * wallet risk scoring. Flagging a wallet as suspicious is a much harder
+ * problem that would need its own heuristics/ML on top of this data. We
+ * deliberately never fabricate a "flagged" label here — every node from
+ * this function comes back unflagged until real detection logic is built.
+ */
+
+import { PublicKey } from "@solana/web3.js";
+
+const HELIUS_ENHANCED_BASE = "https://api-mainnet.helius-rpc.com/v0";
+const HELIUS_WALLET_API_BASE = "https://api.helius.xyz/v1";
+
+const PUMPSWAP_PROGRAM_ID = new PublicKey("pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA");
+
+function heliusRpcUrl(apiKey: string) {
+  return `https://mainnet.helius-rpc.com/?api-key=${apiKey}`;
+}
+
+async function heliusRpc<T>(
+  method: string,
+  params: unknown[],
+  apiKey: string
+): Promise<T | null> {
+  try {
+    const res = await fetch(heliusRpcUrl(apiKey), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: "solsight", method, params }),
+      next: { revalidate: 300 },
+    });
+    if (!res.ok) {
+      console.error(`[helius] RPC ${method} failed: ${res.status} ${res.statusText}`);
+      return null;
+    }
+    const json = await res.json();
+    if (json.error) {
+      console.error(`[helius] RPC ${method} returned an error:`, json.error);
+      return null;
+    }
+    return json.result as T;
+  } catch (err) {
+    console.error(`[helius] RPC ${method} threw:`, err);
+    return null;
+  }
+}
+
+interface HeliusTokenTransfer {
+  fromUserAccount: string | null;
+  toUserAccount: string | null;
+  tokenAmount: number;
+  mint: string;
+}
+
+interface HeliusNativeTransfer {
+  fromUserAccount: string | null;
+  toUserAccount: string | null;
+  amount: number; // lamports
+}
+
+interface HeliusTransaction {
+  signature: string;
+  timestamp: number;
+  type: string;
+  tokenTransfers?: HeliusTokenTransfer[];
+  nativeTransfers?: HeliusNativeTransfer[];
+}
+
+export interface FundFlowEdge {
+  counterparty: string;
+  txCount: number;
+  /** Relative interaction volume vs. this wallet's other counterparties, 0-100. Not a USD or balance figure. */
+  relativeVolume: number;
+}
+
+export async function getWalletFundFlow(
+  address: string,
+  limit = 40
+): Promise<{ edges: FundFlowEdge[]; txCount: number }> {
+  const apiKey = process.env.HELIUS_API_KEY;
+  if (!apiKey) return { edges: [], txCount: 0 };
+
+  const res = await fetch(
+    `${HELIUS_ENHANCED_BASE}/addresses/${address}/transactions?api-key=${apiKey}&limit=${limit}`,
+    { next: { revalidate: 60 } }
+  );
+  if (!res.ok) {
+    console.error(`[helius] getWalletFundFlow failed: ${res.status} ${res.statusText}`);
+    return { edges: [], txCount: 0 };
+  }
+
+  const transactions: HeliusTransaction[] = await res.json();
+
+  // counterparty address -> { txCount, volume } — volume is a unitless
+  // score (SOL lamports + token-amount magnitude), used only to rank
+  // counterparties relative to each other, never shown as a dollar figure.
+  const counterparties = new Map<string, { txCount: number; volume: number }>();
+
+  function record(counterparty: string | null, amount: number) {
+    if (!counterparty || counterparty === address) return;
+    const existing = counterparties.get(counterparty) ?? { txCount: 0, volume: 0 };
+    existing.txCount += 1;
+    existing.volume += Math.abs(amount);
+    counterparties.set(counterparty, existing);
+  }
+
+  for (const tx of transactions) {
+    for (const t of tx.tokenTransfers ?? []) {
+      if (t.fromUserAccount === address) record(t.toUserAccount, t.tokenAmount);
+      if (t.toUserAccount === address) record(t.fromUserAccount, t.tokenAmount);
+    }
+    for (const t of tx.nativeTransfers ?? []) {
+      if (t.fromUserAccount === address) record(t.toUserAccount, t.amount / 1e9);
+      if (t.toUserAccount === address) record(t.fromUserAccount, t.amount / 1e9);
+    }
+  }
+
+  const maxVolume = Math.max(1, ...Array.from(counterparties.values()).map((c) => c.volume));
+
+  const edges: FundFlowEdge[] = Array.from(counterparties.entries())
+    .map(([counterparty, data]) => ({
+      counterparty,
+      txCount: data.txCount,
+      relativeVolume: Math.round((data.volume / maxVolume) * 100),
+    }))
+    .sort((a, b) => b.relativeVolume - a.relativeVolume)
+    .slice(0, 8); // cap to keep the graph readable
+
+  return { edges, txCount: transactions.length };
+}
+
+export interface WalletHolding {
+  mint: string;
+  symbol: string | null;
+  amount: number;
+  usdValue: number | null;
+}
+
+export interface WalletBalanceSummary {
+  solBalance: number;
+  solUsdValue: number | null;
+  tokenCount: number;
+  totalUsdValue: number | null;
+  topHoldings: WalletHolding[];
+}
+
+/**
+ * Wallet balances, including USD values. This previously called
+ * `${api-mainnet.helius-rpc.com}/v0/addresses/{address}/balances`, which is
+ * not a real Helius endpoint — that RPC-style host only serves the
+ * Enhanced Transactions API above. Helius's actual balances-with-USD-value
+ * data lives on the separate Wallet API host (api.helius.xyz), which is
+ * what this now calls. If Helius changes this response shape again, every
+ * field below is read defensively (optional chaining + explicit fallback)
+ * so a shape mismatch degrades to "Balance data unavailable" instead of
+ * throwing — but the endpoint/host itself is the fix for the bug we had.
+ */
+export async function getWalletBalances(address: string): Promise<WalletBalanceSummary | null> {
+  const apiKey = process.env.HELIUS_API_KEY;
+  if (!apiKey) return null;
+
+  const res = await fetch(`${HELIUS_WALLET_API_BASE}/wallet/${address}/balances?api-key=${apiKey}`, {
+    next: { revalidate: 60 },
+  });
+  if (!res.ok) {
+    console.error(`[helius] getWalletBalances failed: ${res.status} ${res.statusText}`);
+    return null;
+  }
+
+  const data = await res.json();
+
+  const nativeLamports = data?.nativeBalance?.lamports ?? data?.nativeBalance ?? 0;
+  const solBalance = Number(nativeLamports) / 1e9;
+  const solUsdValue = typeof data?.nativeBalance?.usdValue === "number" ? data.nativeBalance.usdValue : null;
+
+  const tokens: Array<Record<string, unknown>> = Array.isArray(data?.tokens) ? data.tokens : [];
+
+  const topHoldings: WalletHolding[] = tokens
+    .map((t) => ({
+      mint: String(t.mint ?? ""),
+      symbol: (t.symbol as string | undefined) ?? null,
+      amount: Number(t.amount ?? 0),
+      usdValue: typeof t.usdValue === "number" ? t.usdValue : null,
+    }))
+    .filter((t) => t.mint)
+    .sort((a, b) => (b.usdValue ?? 0) - (a.usdValue ?? 0))
+    .slice(0, 5);
+
+  const tokensUsdTotal = tokens.reduce(
+    (sum, t) => sum + (typeof t.usdValue === "number" ? t.usdValue : 0),
+    0
+  );
+  const totalUsdValue =
+    typeof data?.totalUsdValue === "number"
+      ? data.totalUsdValue
+      : solUsdValue !== null
+        ? solUsdValue + tokensUsdTotal
+        : null;
+
+  return {
+    solBalance,
+    solUsdValue,
+    tokenCount: tokens.length,
+    totalUsdValue,
+    topHoldings,
+  };
+}
+
+export interface MintSafety {
+  /** true = mint authority has been revoked (no one can mint more supply). null = couldn't be determined. */
+  mintAuthorityRevoked: boolean | null;
+  /** true = freeze authority has been revoked (no one can freeze holder accounts). null = couldn't be determined. */
+  freezeAuthorityRevoked: boolean | null;
+  /**
+   * % of total supply held by the 10 largest token accounts on-chain.
+   * Note: these are the largest *token accounts*, not necessarily 10
+   * distinct human holders — a DEX pool's own account can appear here.
+   * Still real on-chain data; just not perfectly deduplicated by owner.
+   */
+  topHolderPct: number | null;
+}
+
+/**
+ * Real on-chain mint safety checks via Helius's Solana RPC — replaces the
+ * "Unknown" placeholders for mint/freeze authority and holder concentration
+ * with actual data read directly from the mint account.
+ *
+ * LP lock/burn status is deliberately NOT included here. Determining it
+ * correctly requires first resolving which AMM pool holds the token's
+ * liquidity (Raydium, Orca, Meteora, etc. each store this differently) and
+ * then checking whether that specific pool's LP mint was burned or sent to
+ * a locker contract — a meaningfully bigger feature on its own, not a
+ * couple of RPC calls. Faking that field with a heuristic would violate
+ * this project's real-data-only rule, so it stays "Unknown" until that
+ * dedicated feature gets built.
+ */
+export async function getMintSafety(mintAddress: string): Promise<MintSafety> {
+  const apiKey = process.env.HELIUS_API_KEY;
+  if (!apiKey) {
+    return { mintAuthorityRevoked: null, freezeAuthorityRevoked: null, topHolderPct: null };
+  }
+
+  const [accountInfo, largestAccounts] = await Promise.all([
+    heliusRpc<{ value: { data: { parsed: { info: Record<string, unknown> } } } | null }>(
+      "getAccountInfo",
+      [mintAddress, { encoding: "jsonParsed" }],
+      apiKey
+    ),
+    heliusRpc<{ value: Array<{ amount: string }> }>(
+      "getTokenLargestAccounts",
+      [mintAddress],
+      apiKey
+    ),
+  ]);
+
+  const parsed = accountInfo?.value?.data?.parsed?.info;
+  if (!parsed) {
+    console.error(`[helius] getMintSafety: could not read mint account for ${mintAddress}`);
+    return { mintAuthorityRevoked: null, freezeAuthorityRevoked: null, topHolderPct: null };
+  }
+
+  const mintAuthorityRevoked = parsed.mintAuthority === null;
+  const freezeAuthorityRevoked = parsed.freezeAuthority === null;
+
+  let topHolderPct: number | null = null;
+  const supply = Number(parsed.supply);
+  const accounts = largestAccounts?.value;
+  if (accounts?.length && supply > 0) {
+    const top10Sum = accounts.slice(0, 10).reduce((sum, a) => sum + Number(a.amount), 0);
+    topHolderPct = Math.min(100, (top10Sum / supply) * 100);
+  }
+
+  return { mintAuthorityRevoked, freezeAuthorityRevoked, topHolderPct };
+}
+
+export interface LpBurnCheckResult {
+  lpSupply: number | null;
+  lpBurned: boolean | null;
+}
+
+/**
+ * Checks whether an LP mint's total supply is zero (fully burned) — the
+ * same mechanism Dexscreener's own "padlock" badge uses. This is a plain,
+ * well-established RPC method (getTokenSupply) with no guesswork involved,
+ * unlike an earlier approach that tried to decode a pool's raw account
+ * data at a hardcoded byte offset — that turned out to be unreliable
+ * across Raydium's different pool layouts. Getting the correct lpMint to
+ * pass in here is handled separately via Raydium's own public API (see
+ * getRaydiumLpMint in lib/market-data.ts).
+ */
+export async function checkLpBurnStatus(lpMint: string): Promise<LpBurnCheckResult> {
+  const apiKey = process.env.HELIUS_API_KEY;
+  if (!apiKey) return { lpSupply: null, lpBurned: null };
+
+  const supplyResult = await heliusRpc<{ value: { amount: string; uiAmount: number | null } }>(
+    "getTokenSupply",
+    [lpMint],
+    apiKey
+  );
+
+  const uiAmount = supplyResult?.value?.uiAmount;
+  if (uiAmount === undefined || uiAmount === null) {
+    return { lpSupply: null, lpBurned: null };
+  }
+
+  return { lpSupply: uiAmount, lpBurned: uiAmount === 0 };
+}
+
+export interface PumpSwapLpInfo {
+  /** The derived LP mint address — always present if PDA derivation succeeds, even if unverified. Check `verified` before trusting it. */
+  lpMint: string | null;
+  /** True only after confirming the derived address actually decodes as a real, initialized mint account on-chain — not just a syntactically valid address. */
+  verified: boolean;
+  note: string | null;
+}
+
+/**
+ * Derives a PumpSwap pool's LP mint address via PDA (no external API call
+ * needed — the address is deterministic). PumpSwap pools use Token-2022
+ * (not the older SPL Token program) for LP tokens, with each pool's LP
+ * mint derived from seeds ["pool_lp_mint", poolAddress] under the
+ * PumpSwap program (pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA).
+ *
+ * IMPORTANT — this has NOT been confirmed against a live PumpSwap pool
+ * yet. Unlike the Raydium path (verified end-to-end against Solscan), this
+ * is a first attempt based on public documentation of PumpSwap's account
+ * structure, not live-tested. It self-checks by confirming the derived
+ * address actually decodes as a real mint account before returning
+ * verified: true — if the seeds or program ID assumption is wrong, this
+ * will honestly report verified: false rather than silently returning a
+ * bogus address. Do not trust lpMint here for anything real until a
+ * verified: true result has also been manually cross-checked (e.g. on
+ * Solscan), same as was done for the Raydium path.
+ */
+export async function getPumpSwapLpMint(poolAddress: string): Promise<PumpSwapLpInfo> {
+  const apiKey = process.env.HELIUS_API_KEY;
+  if (!apiKey) return { lpMint: null, verified: false, note: "HELIUS_API_KEY not set" };
+
+  let derivedMint: PublicKey;
+  try {
+    const poolPubkey = new PublicKey(poolAddress);
+    [derivedMint] = PublicKey.findProgramAddressSync(
+      [Buffer.from("pool_lp_mint"), poolPubkey.toBuffer()],
+      PUMPSWAP_PROGRAM_ID
+    );
+  } catch (err) {
+    return { lpMint: null, verified: false, note: `PDA derivation failed: ${err}` };
+  }
+
+  // Confirm the derived address is actually a real, initialized mint
+  // account before trusting it — PDA derivation always produces *a*
+  // syntactically valid address whether or not the seeds/program
+  // assumption is correct, so this check is what separates "we computed
+  // something" from "we computed the right thing."
+  const accountInfo = await heliusRpc<{
+    value: { data: { parsed?: { type: string; info: Record<string, unknown> } }; owner: string } | null;
+  }>("getAccountInfo", [derivedMint.toBase58(), { encoding: "jsonParsed" }], apiKey);
+
+  const parsed = accountInfo?.value?.data?.parsed;
+  if (!parsed || parsed.type !== "mint") {
+    return {
+      lpMint: derivedMint.toBase58(),
+      verified: false,
+      note: "Derived address doesn't decode as a real mint account — the PDA seeds/program assumption may be wrong",
+    };
+  }
+
+  return { lpMint: derivedMint.toBase58(), verified: true, note: null };
+}

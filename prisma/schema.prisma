@@ -1,0 +1,315 @@
+// SolSight — Prisma schema
+// Postgres (Vercel Postgres / Supabase compatible)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ─────────────────────────────────────────────────────────
+// Auth (NextAuth-compatible) + wallet identity
+// ─────────────────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  email         String?   @unique
+  name          String?
+  image         String?
+  emailVerified DateTime?
+
+  // Primary Solana wallet used for sign-in-with-wallet
+  walletAddress String? @unique
+
+  // Discord identity, linked via OAuth
+  discordId       String? @unique
+  discordUsername String?
+
+  role      Role     @default(MEMBER)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  accounts     Account[]
+  sessions     Session[]
+  watchlists   Watchlist[]
+  votes        SignalVote[]
+  comments     SignalComment[]
+  trackedWallets TrackedWallet[]
+  alerts       Alert[]
+
+  @@index([walletAddress])
+}
+
+enum Role {
+  MEMBER
+  CONTRIBUTOR
+  ADMIN
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ─────────────────────────────────────────────────────────
+// Tokens & market data
+// ─────────────────────────────────────────────────────────
+
+model Token {
+  id            String   @id @default(cuid())
+  mintAddress   String   @unique
+  symbol        String
+  name          String
+  imageUrl      String?
+  decimals      Int      @default(9)
+
+  // Snapshot market data, refreshed by background jobs
+  priceUsd        Float?
+  marketCapUsd    Float?
+  liquidityUsd    Float?
+  volume24hUsd    Float?
+  priceChange1h   Float?
+  priceChange24h  Float?
+  holderCount     Int?
+
+  // Rug / safety screener output
+  rugScore        Int?     // 0 (safest) – 100 (highest risk)
+  lpLocked        Boolean?
+  lpBurned        Boolean?
+  mintAuthorityRevoked Boolean?
+  freezeAuthorityRevoked Boolean?
+  topHolderPct    Float?   // % supply held by top 10 wallets
+
+  firstSeenAt     DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  signals         Signal[]
+  watchlistItems  WatchlistItem[]
+  chartAnnotations ChartAnnotation[]
+  mentions        SocialMention[]
+
+  @@index([symbol])
+  @@index([rugScore])
+  @@index([marketCapUsd])
+}
+
+// ─────────────────────────────────────────────────────────
+// Signals — the core public feed
+// ─────────────────────────────────────────────────────────
+
+model Signal {
+  id        String       @id @default(cuid())
+  tokenId   String
+  token     Token        @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  type      SignalType
+  headline  String       // short human-readable summary, e.g. "Breakout above 30m resistance"
+  reasoning String       @db.Text // AI-generated or rules-engine explanation
+
+  qualityScore Int        // 0-100 composite score shown on the feed
+  confidence   Float       // 0-1 model confidence
+  riskLevel    RiskLevel
+
+  sourceModel  String?     // e.g. "claude-sonnet-4-6" or "rules-engine-v2"
+
+  createdAt DateTime @default(now())
+  expiresAt DateTime?
+
+  votes    SignalVote[]
+  comments SignalComment[]
+
+  @@index([tokenId])
+  @@index([createdAt])
+  @@index([qualityScore])
+}
+
+enum SignalType {
+  BREAKOUT
+  MOMENTUM
+  WHALE_ACCUMULATION
+  WHALE_DISTRIBUTION
+  LIQUIDITY_CHANGE
+  RUG_WARNING
+  SOCIAL_SPIKE
+  NEW_LISTING
+}
+
+enum RiskLevel {
+  LOW
+  MEDIUM
+  HIGH
+  EXTREME
+}
+
+model SignalVote {
+  id       String   @id @default(cuid())
+  signalId String
+  userId   String
+  value    Int      // +1 or -1
+  createdAt DateTime @default(now())
+
+  signal Signal @relation(fields: [signalId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([signalId, userId])
+}
+
+model SignalComment {
+  id        String   @id @default(cuid())
+  signalId  String
+  userId    String
+  body      String   @db.Text
+  createdAt DateTime @default(now())
+
+  signal Signal @relation(fields: [signalId], references: [id], onDelete: Cascade)
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([signalId])
+}
+
+// ─────────────────────────────────────────────────────────
+// Watchlists
+// ─────────────────────────────────────────────────────────
+
+model Watchlist {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String   @default("My Watchlist")
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user  User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  items WatchlistItem[]
+
+  @@index([userId])
+}
+
+model WatchlistItem {
+  id          String   @id @default(cuid())
+  watchlistId String
+  tokenId     String
+  addedAt     DateTime @default(now())
+  notifyOnSignal Boolean @default(true)
+
+  watchlist Watchlist @relation(fields: [watchlistId], references: [id], onDelete: Cascade)
+  token     Token     @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@unique([watchlistId, tokenId])
+}
+
+// ─────────────────────────────────────────────────────────
+// Wallet tracking / bubble map
+// ─────────────────────────────────────────────────────────
+
+model TrackedWallet {
+  id        String   @id @default(cuid())
+  userId    String
+  address   String
+  label     String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, address])
+}
+
+// Cached wallet-to-wallet fund-flow edges used to render bubble maps / network graphs
+model WalletEdge {
+  id            String   @id @default(cuid())
+  fromAddress   String
+  toAddress     String
+  tokenMint     String
+  totalAmount   Float
+  txCount       Int
+  lastTxAt      DateTime
+  updatedAt     DateTime @updatedAt
+
+  @@unique([fromAddress, toAddress, tokenMint])
+  @@index([tokenMint])
+}
+
+// ─────────────────────────────────────────────────────────
+// AI chart annotations
+// ─────────────────────────────────────────────────────────
+
+model ChartAnnotation {
+  id        String   @id @default(cuid())
+  tokenId   String
+  timeframe String   // "5m" | "1h" | "1d" ...
+  label     String   // e.g. "Support", "Breakout", "Distribution zone"
+  note      String   @db.Text
+  timestamp DateTime // candle time the annotation refers to
+  priceLevel Float?
+  createdAt DateTime @default(now())
+
+  token Token @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@index([tokenId, timeframe])
+}
+
+// ─────────────────────────────────────────────────────────
+// Social signal (X / Discord mentions)
+// ─────────────────────────────────────────────────────────
+
+model SocialMention {
+  id         String   @id @default(cuid())
+  tokenId    String
+  platform   String   // "x" | "discord"
+  mentionCount Int
+  sentiment  Float?   // -1..1
+  windowStart DateTime
+  windowEnd   DateTime
+
+  token Token @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@index([tokenId, windowStart])
+}
+
+// ─────────────────────────────────────────────────────────
+// User alerts / notification preferences
+// ─────────────────────────────────────────────────────────
+
+model Alert {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String   // "watchlist_signal" | "rug_warning" | "wallet_move"
+  channel   String   // "web" | "discord"
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
