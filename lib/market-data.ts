@@ -69,32 +69,69 @@ export function isAboveMemecoinMarketCapCeiling(
   liquidityUsd: number | null = null
 ): boolean {
   if (marketCapUsd !== null) return marketCapUsd > MEMECOIN_MARKET_CAP_CEILING_USD;
-  // Market cap unknown — fall back to a conservative liquidity check rather
-  // than assuming it's safe to treat as a small-cap candidate.
   return liquidityUsd !== null && liquidityUsd > MEMECOIN_LIQUIDITY_FALLBACK_CEILING_USD;
 }
 
 /**
- * Birdeye's free/dev tier rate limit is tight enough that a burst of
- * requests (multiple page loads, dev hot-reloads, several users hitting the
- * same 30s revalidate window) can trigger a 429. Previously that surfaced
- * as an empty chart/overview with no explanation. This wraps any fetch with
- * a couple of short retries specifically for 429s — honoring a `Retry-After`
- * header if Birdeye sends one, falling back to short exponential backoff
- * otherwise — so a transient rate limit self-heals instead of immediately
- * presenting an empty state.
+ * Birdeye's free/dev tier rate limit is tight enough that even two requests
+ * fired in the same instant (e.g. getTokenOverview + getCandles kicked off
+ * together in a Promise.all) can trip a 429 — this isn't just a "many
+ * concurrent calls" problem, it's a "any two at once" problem. Rather than
+ * hunting down and re-sequencing every call site that happens to overlap
+ * (which is what fixed the RSI panel but left the overview/candles pair
+ * exposed), every Birdeye request in this module funnels through this one
+ * gate, which chains them into a single-file queue with a small minimum gap
+ * between each actual network call. It's process-local — it doesn't help
+ * across separate serverless instances — but within one running server it
+ * guarantees Birdeye never sees two requests from this app at the same
+ * instant, regardless of which functions triggered them or how many call
+ * sites exist now or get added later.
+ */
+// 1100ms rather than something tighter like 250ms: Birdeye's paid Standard
+// plan is 50 requests/sec, but free/trial tiers on API platforms like this
+// are commonly capped around 1 request/sec — if that's the tier in use
+// here, anything faster than ~1s between calls will keep 429ing no matter
+// how well-sequenced the calls are. Check the Birdeye dashboard for the
+// account's actual plan/RPS limit and tighten this back down once known;
+// this value is a conservative placeholder, not a confirmed number.
+const BIRDEYE_MIN_GAP_MS = 1100;
+let birdeyeQueue: Promise<void> = Promise.resolve();
+let lastBirdeyeCallAt = 0;
+
+function withBirdeyeGate<T>(fn: () => Promise<T>): Promise<T> {
+  const scheduled = birdeyeQueue.then(async () => {
+    const wait = Math.max(0, lastBirdeyeCallAt + BIRDEYE_MIN_GAP_MS - Date.now());
+    if (wait > 0) await sleep(wait);
+    lastBirdeyeCallAt = Date.now();
+  });
+
+  // Keep the queue alive even if this call ends up throwing/erroring below —
+  // a rejected link in the chain would otherwise permanently jam every
+  // Birdeye call queued after it.
+  birdeyeQueue = scheduled.catch(() => undefined);
+
+  return scheduled.then(fn);
+}
+
+/**
+ * Wraps any fetch with a couple of short retries specifically for 429s —
+ * honoring a `Retry-After` header if Birdeye sends one, falling back to
+ * short exponential backoff otherwise — so a transient rate limit self-heals
+ * instead of immediately presenting an empty state. Every actual network
+ * attempt (including retries) goes through withBirdeyeGate above, so retries
+ * from one call can't collide with a fresh request from another.
  */
 async function fetchWithRetry(
   url: string,
   init: RequestInit,
-  { retries = 2, baseDelayMs = 400 }: { retries?: number; baseDelayMs?: number } = {}
+  { retries = 3, baseDelayMs = 400 }: { retries?: number; baseDelayMs?: number } = {}
 ): Promise<Response> {
   let lastRes: Response | null = null;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     let res: Response;
     try {
-      res = await fetch(url, init);
+      res = await withBirdeyeGate(() => fetch(url, init));
     } catch (err) {
       if (attempt === retries) throw err;
       await sleep(baseDelayMs * 2 ** attempt);
@@ -104,7 +141,7 @@ async function fetchWithRetry(
     if (res.status !== 429) return res;
 
     lastRes = res;
-    if (attempt === retries) break; // out of retries, return the 429 as-is
+    if (attempt === retries) break;
 
     const retryAfterHeader = res.headers.get("retry-after");
     const retryAfterMs = retryAfterHeader ? Number(retryAfterHeader) * 1000 : NaN;
@@ -150,14 +187,6 @@ export async function getTokenOverview(mintAddress: string): Promise<TokenOvervi
           name: d.name,
           imageUrl: d.logoURI ?? null,
           priceUsd: d.price ?? null,
-          // Birdeye's documented response fields are `realMc` (circulating-
-          // supply-adjusted market cap) and `marketCap` (fallback) — `mc`
-          // is not a real field in their schema. Reading the wrong key here
-          // silently returned null for every token, which meant the
-          // memecoin market-cap ceiling filter never actually fired (a
-          // null market cap was treated as "not above the ceiling," so
-          // large-caps like WETH and ZEC slipped through the discovery
-          // filter despite the ceiling logic being correct).
           marketCapUsd: d.realMc ?? d.marketCap ?? null,
           liquidityUsd: d.liquidity ?? null,
           volume24hUsd: d.v24hUSD ?? null,
@@ -173,7 +202,6 @@ export async function getTokenOverview(mintAddress: string): Promise<TokenOvervi
     }
   }
 
-  // Dexscreener fallback — no API key required
   const res = await fetch(`${DEXSCREENER_BASE}/latest/dex/tokens/${mintAddress}`, {
     next: { revalidate: 30 },
   });
@@ -219,7 +247,6 @@ export async function getPrimaryPairInfo(mintAddress: string): Promise<PrimaryPa
   const pairs: Array<Record<string, unknown>> = json.pairs ?? [];
   if (pairs.length === 0) return null;
 
-  // Highest liquidity pair is the primary pool.
   const sorted = [...pairs].sort((a, b) => {
     const aLiq = ((a.liquidity as { usd?: number } | undefined)?.usd) ?? 0;
     const bLiq = ((b.liquidity as { usd?: number } | undefined)?.usd) ?? 0;
@@ -234,30 +261,9 @@ export async function getPrimaryPairInfo(mintAddress: string): Promise<PrimaryPa
 
 export interface RaydiumPoolLpInfo {
   lpMint: string | null;
-  /** Raydium pool type — "Standard" (classic constant-product, has a fungible LP mint we can check) or "Concentrated" (CLMM, uses per-position NFTs instead — no single LP mint/supply to check with this method). */
   poolType: string | null;
 }
 
-/**
- * Looks up a Raydium pool's real LP mint address via Raydium's own public
- * API (api-v3.raydium.io) — no API key required, no binary account
- * decoding needed. This replaces an earlier approach that tried to decode
- * the pool's raw on-chain account at a guessed byte offset, which turned
- * out to be unreliable: Raydium has multiple pool account layouts (classic
- * AMM v4, newer CPMM, CLMM) and a single hardcoded offset doesn't work
- * across all of them — verified wrong against a real pool during testing
- * (decoded to the System Program's null address instead of a real mint).
- * Raydium's own API abstracts that away entirely, which is why this is
- * the more reliable path.
- *
- * Note: Concentrated Liquidity (CLMM) pools genuinely have no lpMint field
- * — verified during testing against a real CLMM pool. CLMM liquidity is
- * represented as per-position NFTs rather than one fungible LP token, so
- * "check whether the LP mint's supply is zero" fundamentally doesn't apply
- * to them. This returns poolType so callers can tell "not found/unsupported
- * shape" apart from "this is a CLMM pool, which needs different handling
- * we haven't built."
- */
 export async function getRaydiumPoolLpInfo(pairAddress: string): Promise<RaydiumPoolLpInfo> {
   try {
     const res = await fetch(
@@ -290,12 +296,6 @@ export interface TokenSearchResult {
   priceUsd: number | null;
 }
 
-/**
- * Search for Solana tokens by symbol or name via Dexscreener's public
- * search endpoint (no API key required). Used to power the "look up a
- * token" search bar — resolves something like "BONK" to its real mint
- * address so users don't need to already know it.
- */
 export async function searchTokens(query: string): Promise<TokenSearchResult[]> {
   if (!query.trim()) return [];
 
@@ -336,16 +336,6 @@ export interface LpSecurity {
   lpBurned: boolean | null;
 }
 
-/**
- * Best-effort LP lock/burn check via Birdeye's dedicated Security endpoint
- * (/defi/token_security). Birdeye's exact response schema for this endpoint
- * isn't fully documented publicly, so this checks several plausible field
- * name candidates rather than committing to one guess. If none match, both
- * values stay null ("Unknown") — same honest fallback as before this
- * existed, just with a real chance of getting genuine data when the fields
- * do line up. This endpoint also requires at least a Lite/Starter Birdeye
- * plan; on a lower tier it 403s and this degrades to null the same way.
- */
 export async function getLpSecurity(mintAddress: string): Promise<LpSecurity> {
   const apiKey = process.env.BIRDEYE_API_KEY;
   if (!apiKey) return { lpLocked: null, lpBurned: null };
@@ -374,6 +364,7 @@ export async function getLpSecurity(mintAddress: string): Promise<LpSecurity> {
     return { lpLocked: null, lpBurned: null };
   }
 }
+
 export interface Candle {
   time: number; // unix seconds
   open: number;
@@ -383,7 +374,7 @@ export interface Candle {
   volume: number;
 }
 
-export type CandleTimeframe = "1s" | "1m" | "5m" | "15m" | "1h" | "4h" | "1d";
+export type CandleTimeframe = "1s" | "1m" | "5m" | "15m" | "1h" | "2h" | "4h" | "12h" | "1d";
 
 export async function getCandles(
   mintAddress: string,
@@ -402,7 +393,9 @@ export async function getCandles(
     "5m": "5m",
     "15m": "15m",
     "1h": "1H",
+    "2h": "2H",
     "4h": "4H",
+    "12h": "12H",
     "1d": "1D",
   };
 
@@ -416,7 +409,9 @@ export async function getCandles(
     "5m": 60 * 60 * 24 * 3, // 3 days
     "15m": 60 * 60 * 24 * 3, // 3 days
     "1h": 60 * 60 * 24 * 14, // 14 days
+    "2h": 60 * 60 * 24 * 21, // 21 days — enough 2h candles for a 14-period RSI
     "4h": 60 * 60 * 24 * 30, // 30 days
+    "12h": 60 * 60 * 24 * 60, // 60 days — enough 12h candles for a 14-period RSI
     "1d": 60 * 60 * 24 * 180, // 180 days
   };
 
@@ -428,19 +423,23 @@ export async function getCandles(
     { headers: { "X-API-KEY": apiKey, "x-chain": "solana" }, next: { revalidate: 30 } }
   );
   if (!res.ok) {
-    console.error(`[birdeye] getCandles failed: ${res.status} ${res.statusText}`);
+    // Log the actual response body on top of status/statusText — Birdeye's
+    // 429 body usually names the specific limit that was hit (a per-second
+    // rate vs. a monthly quota are different problems with different
+    // fixes), and status/statusText alone can't distinguish them. Also log
+    // any rate-limit headers, since the body message alone can be too
+    // generic ("Too many requests") to tell which kind of limit this is.
+    const body = await res.text().catch(() => "<no body>");
+    const rateLimitHeaders = Object.fromEntries(
+      [...res.headers.entries()].filter(([key]) => key.toLowerCase().includes("rate") || key.toLowerCase().includes("retry"))
+    );
+    console.error(
+      `[birdeye] getCandles failed: ${res.status} ${res.statusText} — ${body} — headers: ${JSON.stringify(rateLimitHeaders)}`
+    );
     return [];
   }
   const json = await res.json();
 
-  // Birdeye's v3 OHLCV response doesn't reliably use `unixTime` the way
-  // their older v1 endpoint does — every candle's `open`/`high`/`low`/
-  // `close`/`volume` mapped correctly, but `time` came through as
-  // `undefined` for every single candle, silently failing chart rendering
-  // client-side with no server error (the fetch itself succeeds; only this
-  // one field is wrong). Rather than guess a single new field name and
-  // risk this breaking again on the next Birdeye schema tweak, check the
-  // plausible candidates in order.
   return (json.data?.items ?? []).map((c: Record<string, number>) => ({
     time: c.unixTime ?? c.time ?? c.timestamp ?? c.unix_time,
     open: c.o,
@@ -462,14 +461,6 @@ export interface TrendingToken {
   rank: number;
 }
 
-/**
- * Real trending-tokens list from Birdeye, used to auto-discover new tokens
- * for the signal feed instead of leaving it seeded with only a couple of
- * sample rows. Sorted by 24h volume rather than Birdeye's default "rank"
- * (popularity) sort — a lesson learned on a sibling project, where a
- * popularity-ranked trending list surfaced tokens with real trading
- * activity far less often than a volume-sorted one does.
- */
 export async function getTrendingTokens(limit = 20): Promise<TrendingToken[]> {
   const apiKey = process.env.BIRDEYE_API_KEY;
   if (!apiKey) return [];
@@ -500,10 +491,6 @@ export async function getTrendingTokens(limit = 20): Promise<TrendingToken[]> {
     }));
 }
 
-/**
- * Very small heuristic rug-risk scorer used as a rules-engine fallback when
- * a fuller on-chain audit hasn't run yet. Returns 0 (safe) – 100 (risky).
- */
 export function heuristicRugScore(input: {
   liquidityUsd: number | null;
   topHolderPct: number | null;

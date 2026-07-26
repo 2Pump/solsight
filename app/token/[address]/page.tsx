@@ -1,12 +1,14 @@
 import { PriceChartPanel } from "@/components/charts/price-chart-panel";
 import { AiAnalysisPanel } from "@/components/dashboard/ai-analysis-panel";
 import { RiskPanel } from "@/components/dashboard/risk-panel";
+import { RsiPanel } from "@/components/dashboard/rsi-panel";
 import { AddToWatchlistButton } from "@/components/dashboard/add-to-watchlist-button";
 import { formatCompact, formatUsd, formatPct, formatSymbol, shortenAddress } from "@/lib/utils";
 import { ExternalLink, AlertTriangle } from "lucide-react";
 import Link from "next/link";
 import { getTokenOverview, getCandles, heuristicRugScore } from "@/lib/market-data";
 import { getMintSafety } from "@/lib/helius";
+import { getMultiTimeframeRsi } from "@/lib/technical-analysis";
 import { analyzeChart } from "@/lib/anthropic";
 import { auth } from "@/lib/auth";
 import { redirect } from "next/navigation";
@@ -31,6 +33,13 @@ export default async function TokenDetailPage({
     getCandles(address, "15m"),
     getMintSafety(address),
   ]);
+
+  // Fetched separately, after the above resolve, rather than in the same
+  // Promise.all — running it concurrently with the chart's own candle
+  // fetch and the token overview call meant two Birdeye requests firing at
+  // the exact same instant, which was enough to trip their rate limit even
+  // after cutting the RSI panel down to a single request.
+  const rsiData = await getMultiTimeframeRsi(address);
   const hasChartHistory = candles.length >= 10;
   const lastPrice = hasChartHistory ? candles[candles.length - 1].close : (overview?.priceUsd ?? null);
 
@@ -52,6 +61,7 @@ export default async function TokenDetailPage({
   const canAnalyze = hasChartHistory && !!process.env.ANTHROPIC_API_KEY && !!overview;
   const analysis = canAnalyze
     ? await analyzeChart({
+        mintAddress: address,
         symbol: overview!.symbol,
         candles: candles.map((c) => ({
           timeframe: "15m",
@@ -175,6 +185,7 @@ export default async function TokenDetailPage({
                 liquidityUsd: overview.liquidityUsd,
               }}
             />
+            <RsiPanel data={rsiData} />
           </div>
         </div>
       </div>
