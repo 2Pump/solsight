@@ -1,13 +1,27 @@
 import { WalletNetwork, type WalletNode, type WalletEdge } from "@/components/charts/wallet-network";
 import { WalletSearchBar } from "@/components/dashboard/wallet-search-bar";
-import { shortenAddress, formatUsd, formatSymbol } from "@/lib/utils";
+import { TrackWalletButton } from "@/components/dashboard/track-wallet-button";
+import { shortenAddress, formatUsd, formatSymbol, formatRelativeTime } from "@/lib/utils";
 import { getWalletFundFlow, getWalletBalances } from "@/lib/helius";
+import { prisma } from "@/lib/prisma";
 import { ExternalLink, AlertTriangle } from "lucide-react";
 import Link from "next/link";
 import { auth } from "@/lib/auth";
 import { redirect } from "next/navigation";
 
 export const revalidate = 60;
+
+// A counterparty needs a real lean toward one direction before we label it
+// — anything close to 50/50 is honestly "balanced," not arbitrarily
+// assigned to whichever side has one more transaction.
+function directionFor(inflowCount: number, outflowCount: number): "inflow" | "outflow" | "balanced" {
+  const total = inflowCount + outflowCount;
+  if (total === 0) return "balanced";
+  const inflowShare = inflowCount / total;
+  if (inflowShare >= 0.65) return "inflow";
+  if (inflowShare <= 0.35) return "outflow";
+  return "balanced";
+}
 
 export default async function WalletDetailPage({
   params,
@@ -16,12 +30,14 @@ export default async function WalletDetailPage({
 }) {
   const session = await auth();
   if (!session?.user) redirect("/auth");
+  const userId = (session.user as { id: string }).id;
 
   const { address } = await params;
 
-  const [{ edges: fundFlow, txCount }, balances] = await Promise.all([
+  const [{ edges: fundFlow, txCount }, balances, existingTrackedWallet] = await Promise.all([
     getWalletFundFlow(address),
     getWalletBalances(address),
+    prisma.trackedWallet.findUnique({ where: { userId_address: { userId, address } } }),
   ]);
 
   const hasData = fundFlow.length > 0;
@@ -42,20 +58,26 @@ export default async function WalletDetailPage({
     from: address,
     to: f.counterparty,
     strength: f.relativeVolume / 100,
+    direction: directionFor(f.inflowCount, f.outflowCount),
+    txCount: f.txCount,
+    lastTxAt: f.lastTxAt,
   }));
 
   return (
     <div className="relative">
       <div className="pointer-events-none absolute inset-0 bg-signal-grid" />
       <div className="container relative py-10">
-        <div className="mb-6">
-          <h1 className="font-display text-2xl font-semibold text-ink">Wallet Deep-Dive</h1>
-          <div className="mt-1 flex items-center gap-1.5 font-mono text-sm text-ink-faint">
-            {shortenAddress(address, 8)}
-            <Link href={`https://solscan.io/account/${address}`} target="_blank">
-              <ExternalLink className="h-3.5 w-3.5" />
-            </Link>
+        <div className="mb-6 flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h1 className="font-display text-2xl font-semibold text-ink">Wallet Deep-Dive</h1>
+            <div className="mt-1 flex items-center gap-1.5 font-mono text-sm text-ink-faint">
+              {shortenAddress(address, 8)}
+              <Link href={`https://solscan.io/account/${address}`} target="_blank">
+                <ExternalLink className="h-3.5 w-3.5" />
+              </Link>
+            </div>
           </div>
+          <TrackWalletButton address={address} initiallyTracked={!!existingTrackedWallet} />
         </div>
 
         <div className="mb-6 max-w-md">
@@ -81,26 +103,46 @@ export default async function WalletDetailPage({
                 <p className="mt-3 text-sm text-ink-faint">No connections found.</p>
               ) : (
                 <div className="mt-3 divide-y divide-border">
-                  {fundFlow.map((f) => (
-                    <div
-                      key={f.counterparty}
-                      className="flex items-center justify-between py-2.5 text-sm"
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-ink-muted">
-                          {shortenAddress(f.counterparty)}
-                        </span>
-                      </div>
-                      <span className="font-mono text-xs text-ink-faint">
-                        {f.txCount} tx · {f.relativeVolume}% relative flow
-                      </span>
-                    </div>
-                  ))}
+                  {fundFlow.map((f) => {
+                    const direction = directionFor(f.inflowCount, f.outflowCount);
+                    return (
+                      <Link
+                        key={f.counterparty}
+                        href={`/wallet/${f.counterparty}`}
+                        className="-mx-1 flex items-center justify-between rounded-lg px-1 py-2.5 text-sm transition-colors hover:bg-white/5"
+                      >
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={
+                              "h-1.5 w-1.5 shrink-0 rounded-full " +
+                              (direction === "inflow"
+                                ? "bg-pulse"
+                                : direction === "outflow"
+                                  ? "bg-amber"
+                                  : "bg-signal")
+                            }
+                          />
+                          <span className="font-mono text-ink-muted">
+                            {shortenAddress(f.counterparty)}
+                          </span>
+                        </div>
+                        <div className="text-right">
+                          <div className="font-mono text-xs text-ink-faint">
+                            {f.txCount} tx · {f.relativeVolume}% relative flow
+                          </div>
+                          <div className="text-[11px] text-ink-faint">
+                            Last activity {formatRelativeTime(f.lastTxAt)}
+                          </div>
+                        </div>
+                      </Link>
+                    );
+                  })}
                 </div>
               )}
               <p className="mt-3 text-xs text-ink-faint">
                 Based on the last {txCount || 0} transactions. "Relative flow" ranks counterparties
-                against each other — it is not a dollar amount or share of holdings.
+                against each other — it is not a dollar amount or share of holdings. Dot color shows
+                real transaction direction: teal sends to this wallet, amber receives from it.
               </p>
             </div>
 

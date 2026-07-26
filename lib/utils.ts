@@ -52,6 +52,25 @@ export function riskLevelFromScore(score: number): "LOW" | "MEDIUM" | "HIGH" | "
 }
 
 /**
+ * Format a unix-seconds timestamp as relative time ("3h ago", "2d ago").
+ * Returns "—" for 0/null since that means no real timestamp was available,
+ * not "just now" — never let a missing value read as fresher than it is.
+ */
+export function formatRelativeTime(unixSeconds: number | null | undefined): string {
+  if (!unixSeconds) return "—";
+  const diffSeconds = Math.max(0, Math.floor(Date.now() / 1000) - unixSeconds);
+  if (diffSeconds < 60) return "just now";
+  const diffMinutes = Math.floor(diffSeconds / 60);
+  if (diffMinutes < 60) return `${diffMinutes}m ago`;
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  const diffDays = Math.floor(diffHours / 24);
+  if (diffDays < 30) return `${diffDays}d ago`;
+  const diffMonths = Math.floor(diffDays / 30);
+  return `${diffMonths}mo ago`;
+}
+
+/**
  * Strip any leading "$" from a token symbol before display. Some providers
  * (and some on-chain token metadata) already include the $ in the symbol
  * string itself — rendering `$${symbol}` on top of that produced the

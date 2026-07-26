@@ -73,8 +73,12 @@ interface HeliusTransaction {
 export interface FundFlowEdge {
   counterparty: string;
   txCount: number;
+  inflowCount: number;
+  outflowCount: number;
   /** Relative interaction volume vs. this wallet's other counterparties, 0-100. Not a USD or balance figure. */
   relativeVolume: number;
+  /** Unix seconds of the most recent transaction with this counterparty, from real tx data. */
+  lastTxAt: number;
 }
 
 export async function getWalletFundFlow(
@@ -95,27 +99,37 @@ export async function getWalletFundFlow(
 
   const transactions: HeliusTransaction[] = await res.json();
 
-  // counterparty address -> { txCount, volume } — volume is a unitless
-  // score (SOL lamports + token-amount magnitude), used only to rank
-  // counterparties relative to each other, never shown as a dollar figure.
-  const counterparties = new Map<string, { txCount: number; volume: number }>();
+  // counterparty address -> aggregate stats. Inflow/outflow tracked
+  // separately now (previously collapsed into one undirected "volume"
+  // number) so the UI can show real direction — e.g. "mostly sending to
+  // you" vs. "mostly receiving from you" — instead of just an unlabeled
+  // interaction score.
+  const counterparties = new Map<
+    string,
+    { txCount: number; volume: number; inflowCount: number; outflowCount: number; lastTxAt: number }
+  >();
 
-  function record(counterparty: string | null, amount: number) {
+  function record(counterparty: string | null, amount: number, direction: "in" | "out", timestamp: number) {
     if (!counterparty || counterparty === address) return;
-    const existing = counterparties.get(counterparty) ?? { txCount: 0, volume: 0 };
+    const existing =
+      counterparties.get(counterparty) ??
+      { txCount: 0, volume: 0, inflowCount: 0, outflowCount: 0, lastTxAt: 0 };
     existing.txCount += 1;
     existing.volume += Math.abs(amount);
+    if (direction === "in") existing.inflowCount += 1;
+    else existing.outflowCount += 1;
+    existing.lastTxAt = Math.max(existing.lastTxAt, timestamp || 0);
     counterparties.set(counterparty, existing);
   }
 
   for (const tx of transactions) {
     for (const t of tx.tokenTransfers ?? []) {
-      if (t.fromUserAccount === address) record(t.toUserAccount, t.tokenAmount);
-      if (t.toUserAccount === address) record(t.fromUserAccount, t.tokenAmount);
+      if (t.fromUserAccount === address) record(t.toUserAccount, t.tokenAmount, "out", tx.timestamp);
+      if (t.toUserAccount === address) record(t.fromUserAccount, t.tokenAmount, "in", tx.timestamp);
     }
     for (const t of tx.nativeTransfers ?? []) {
-      if (t.fromUserAccount === address) record(t.toUserAccount, t.amount / 1e9);
-      if (t.toUserAccount === address) record(t.fromUserAccount, t.amount / 1e9);
+      if (t.fromUserAccount === address) record(t.toUserAccount, t.amount / 1e9, "out", tx.timestamp);
+      if (t.toUserAccount === address) record(t.fromUserAccount, t.amount / 1e9, "in", tx.timestamp);
     }
   }
 
@@ -125,7 +139,10 @@ export async function getWalletFundFlow(
     .map(([counterparty, data]) => ({
       counterparty,
       txCount: data.txCount,
+      inflowCount: data.inflowCount,
+      outflowCount: data.outflowCount,
       relativeVolume: Math.round((data.volume / maxVolume) * 100),
+      lastTxAt: data.lastTxAt,
     }))
     .sort((a, b) => b.relativeVolume - a.relativeVolume)
     .slice(0, 8); // cap to keep the graph readable

@@ -20,6 +20,7 @@ const NAV = [
 const APP_NAV = [
   { href: "/app", label: "Watchlist" },
   { href: "/feed", label: "Signal Feed" },
+  { href: "/wallet", label: "Wallet Deep-Dive" },
 ];
 
 const APP_PREFIXES = ["/app", "/feed", "/token", "/wallet"];
@@ -46,15 +47,21 @@ export function SiteHeader() {
           </Link>
 
           <nav className="hidden items-center gap-1 md:flex">
-            {(isApp ? APP_NAV : NAV).map((item) => (
-              <Link
-                key={item.href}
-                href={item.href}
-                className="rounded-full px-3.5 py-1.5 text-sm text-ink-muted transition-colors hover:bg-white/5 hover:text-ink"
-              >
-                {item.label}
-              </Link>
-            ))}
+            {(isApp ? APP_NAV : NAV).map((item) => {
+              const active =
+                pathname === item.href || (item.href !== "/app" && pathname?.startsWith(`${item.href}/`));
+              return (
+                <Link
+                  key={item.href}
+                  href={item.href}
+                  className={`rounded-full px-3.5 py-1.5 text-sm transition-colors ${
+                    active ? "bg-white/5 text-ink" : "text-ink-muted hover:bg-white/5 hover:text-ink"
+                  }`}
+                >
+                  {item.label}
+                </Link>
+              );
+            })}
           </nav>
 
           {isApp ? (
