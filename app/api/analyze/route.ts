@@ -43,6 +43,7 @@ export async function POST(req: NextRequest) {
   });
 
   const analysis = await analyzeChart({
+    mintAddress,
     symbol: overview.symbol,
     candles: candles.map((c) => ({
       timeframe,
