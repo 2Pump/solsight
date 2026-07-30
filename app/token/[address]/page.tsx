@@ -1,13 +1,14 @@
 import { PriceChartPanel } from "@/components/charts/price-chart-panel";
 import { AiAnalysisPanel } from "@/components/dashboard/ai-analysis-panel";
 import { RiskPanel } from "@/components/dashboard/risk-panel";
+import { PoolInfoPanel } from "@/components/dashboard/pool-info-panel";
 import { RsiPanel } from "@/components/dashboard/rsi-panel";
 import { AddToWatchlistButton } from "@/components/dashboard/add-to-watchlist-button";
 import { formatCompact, formatUsd, formatPct, formatSymbol, shortenAddress } from "@/lib/utils";
 import { ExternalLink, AlertTriangle } from "lucide-react";
 import Link from "next/link";
-import { getTokenOverview, getCandles, heuristicRugScore, type CandleTimeframe } from "@/lib/market-data";
-import { getMintSafety } from "@/lib/helius";
+import { getTokenOverview, getCandles, getPrimaryPairInfo, heuristicRugScore, type CandleTimeframe } from "@/lib/market-data";
+import { getMintSafety, verifyLpBurnStatus } from "@/lib/helius";
 import { getMultiTimeframeRsi } from "@/lib/technical-analysis";
 import { analyzeChart } from "@/lib/anthropic";
 import { auth } from "@/lib/auth";
@@ -48,11 +49,21 @@ export default async function TokenDetailPage({
   // Real market data — falls back from Birdeye to Dexscreener automatically
   // (see lib/market-data.ts). Returns null if the token can't be found on
   // either provider.
-  const [overview, candles, mintSafety] = await Promise.all([
+  const [overview, candles, mintSafety, pairInfo] = await Promise.all([
     getTokenOverview(address),
     getCandles(address, timeframe),
     getMintSafety(address),
+    getPrimaryPairInfo(address),
   ]);
+
+  // Real LP burn verification (Raydium Standard + PumpSwap only — see
+  // verifyLpBurnStatus's doc comment in lib/helius.ts for exact coverage).
+  // Previously this was hardcoded to null here even though the background
+  // discovery/sync jobs already computed a real answer — this page just
+  // never read it, so "LP burned" always showed "Unknown" regardless of
+  // what was actually known. Fixed by computing it live here too, using
+  // the same shared verification function as those background jobs.
+  const lpBurned = await verifyLpBurnStatus(pairInfo);
 
   // Fetched separately, after the above resolve, rather than in the same
   // Promise.all — running it concurrently with the chart's own candle
@@ -63,16 +74,19 @@ export default async function TokenDetailPage({
   const hasChartHistory = candles.length >= 10;
   const lastPrice = hasChartHistory ? candles[candles.length - 1].close : (overview?.priceUsd ?? null);
 
-  // Real rug-risk heuristic. LP lock/burn status stays "Unknown" — see
+  // Real rug-risk heuristic. LP lock status stays "Unknown" — see
   // lib/helius.ts's getMintSafety doc comment for why that's a deliberately
-  // separate, bigger feature rather than a faked heuristic. Mint/freeze
-  // authority and top-10-holder concentration are now real on-chain reads.
+  // separate, bigger feature rather than a faked heuristic. LP burn status,
+  // mint/freeze authority, top-10-holder concentration, and 24h buy/sell
+  // pressure are all real reads/computations now.
   const rugScore = overview
     ? heuristicRugScore({
         liquidityUsd: overview.liquidityUsd,
         topHolderPct: mintSafety.topHolderPct,
         lpLocked: null,
         mintAuthorityRevoked: mintSafety.mintAuthorityRevoked,
+        buyCount24h: pairInfo?.buyCount24h,
+        sellCount24h: pairInfo?.sellCount24h,
       })
     : null;
 
@@ -198,13 +212,14 @@ export default async function TokenDetailPage({
               data={{
                 rugScore: rugScore ?? 50,
                 lpLocked: null,
-                lpBurned: null,
+                lpBurned,
                 mintAuthorityRevoked: mintSafety.mintAuthorityRevoked,
                 freezeAuthorityRevoked: mintSafety.freezeAuthorityRevoked,
                 topHolderPct: mintSafety.topHolderPct,
                 liquidityUsd: overview.liquidityUsd,
               }}
             />
+            <PoolInfoPanel pairInfo={pairInfo} />
             <RsiPanel data={rsiData} />
           </div>
         </div>
