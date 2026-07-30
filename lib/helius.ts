@@ -11,6 +11,7 @@
  */
 
 import { PublicKey } from "@solana/web3.js";
+import { getRaydiumPoolLpInfo } from "@/lib/market-data";
 
 const HELIUS_ENHANCED_BASE = "https://api-mainnet.helius-rpc.com/v0";
 const HELIUS_WALLET_API_BASE = "https://api.helius.xyz/v1";
@@ -387,4 +388,37 @@ export async function getPumpSwapLpMint(poolAddress: string): Promise<PumpSwapLp
   }
 
   return { lpMint: derivedMint.toBase58(), verified: true, note: null };
+}
+
+/**
+ * Verifies LP burn status for a token given its already-fetched pair info
+ * (from lib/market-data.ts's getPrimaryPairInfo) — shared between the
+ * background discovery/sync jobs (inngest/functions.ts) and the live token
+ * detail page, so both use the exact same verification logic rather than
+ * two copies that could quietly drift apart. See getPumpSwapLpMint and
+ * checkLpBurnStatus above for what "verified" means at each step; only
+ * Raydium Standard and PumpSwap pools are covered, everything else
+ * (pump.fun bonding-curve, Meteora, Raydium CLMM) stays "Unknown" (null)
+ * rather than guessed.
+ */
+export async function verifyLpBurnStatus(
+  pairInfo: { pairAddress: string; dexId: string } | null
+): Promise<boolean | null> {
+  if (!pairInfo) return null;
+
+  if (pairInfo.dexId === "raydium") {
+    const poolInfo = await getRaydiumPoolLpInfo(pairInfo.pairAddress);
+    if (poolInfo.poolType !== "Standard" || !poolInfo.lpMint) return null;
+    const burnStatus = await checkLpBurnStatus(poolInfo.lpMint);
+    return burnStatus.lpBurned;
+  }
+
+  if (pairInfo.dexId === "pumpswap") {
+    const lpInfo = await getPumpSwapLpMint(pairInfo.pairAddress);
+    if (!lpInfo.verified || !lpInfo.lpMint) return null;
+    const burnStatus = await checkLpBurnStatus(lpInfo.lpMint);
+    return burnStatus.lpBurned;
+  }
+
+  return null;
 }
