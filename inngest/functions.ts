@@ -4,61 +4,15 @@ import {
   getTokenOverview,
   getTrendingTokens,
   getPrimaryPairInfo,
-  getRaydiumPoolLpInfo,
   heuristicRugScore,
   isAboveMemecoinMarketCapCeiling,
 } from "@/lib/market-data";
-import { getMintSafety, checkLpBurnStatus, getPumpSwapLpMint } from "@/lib/helius";
+import { getMintSafety, verifyLpBurnStatus } from "@/lib/helius";
 import { FEED_SIGNAL_CAP } from "@/lib/utils";
 
-/**
- * Real, verified LP burn check for a token's primary pool.
- *
- * Covers two verified paths, both confirmed end-to-end against Solscan
- * (exact LP token match, exact supply match):
- * - Raydium Standard (classic constant-product) pools — LP mint resolved
- *   via Raydium's own public API, then a getTokenSupply RPC check.
- * - PumpSwap pools — LP mint derived via PDA (seeds ["pool_lp_mint", pool]
- *   under the PumpSwap program), self-checked to confirm the derived
- *   address is a real mint before trusting it, then the same supply check.
- *
- * An earlier manual attempt at decoding Raydium pool accounts by a guessed
- * byte offset was verified WRONG (decoded to the null address) and was
- * replaced by the API-based approach above.
- *
- * Everything else stays "Unknown" (null) rather than guessed:
- * - pump.fun bonding-curve (pre-graduation) tokens — no LP token exists
- *   yet at that stage, so there's genuinely nothing to check
- * - Meteora and other DEXes — not yet built
- * - Raydium CLMM ("Concentrated") pools — per-position NFTs, not one
- *   fungible LP token, so there's no single supply to check
- * - LP "locked" status (as opposed to burned) — requires recognizing
- *   specific locker-program addresses, which isn't built
- *
- * A Birdeye Security-endpoint-based guess was tried earlier and dropped:
- * it returned null for every single token tested, meaning the guessed
- * field names didn't match Birdeye's actual (undocumented) response shape.
- */
-async function getVerifiedLpBurnStatus(mintAddress: string): Promise<boolean | null> {
-  const pairInfo = await getPrimaryPairInfo(mintAddress);
-  if (!pairInfo) return null;
-
-  if (pairInfo.dexId === "raydium") {
-    const poolInfo = await getRaydiumPoolLpInfo(pairInfo.pairAddress);
-    if (poolInfo.poolType !== "Standard" || !poolInfo.lpMint) return null;
-    const burnStatus = await checkLpBurnStatus(poolInfo.lpMint);
-    return burnStatus.lpBurned;
-  }
-
-  if (pairInfo.dexId === "pumpswap") {
-    const lpInfo = await getPumpSwapLpMint(pairInfo.pairAddress);
-    if (!lpInfo.verified || !lpInfo.lpMint) return null;
-    const burnStatus = await checkLpBurnStatus(lpInfo.lpMint);
-    return burnStatus.lpBurned;
-  }
-
-  return null;
-}
+// LP burn verification now lives in lib/helius.ts as verifyLpBurnStatus,
+// shared between this background job and the live token detail page —
+// see that file's doc comment for exactly what it does and doesn't cover.
 
 /**
  * Refreshes market + risk data for every token currently on a watchlist OR
@@ -85,18 +39,22 @@ export const syncWatchedTokens = inngest.createFunction(
 
     for (const token of tokens) {
       await step.run(`refresh-${token.mintAddress}`, async () => {
-        const [overview, mintSafety, lpBurned] = await Promise.all([
+        const [overview, mintSafety, pairInfo] = await Promise.all([
           getTokenOverview(token.mintAddress),
           getMintSafety(token.mintAddress),
-          getVerifiedLpBurnStatus(token.mintAddress),
+          getPrimaryPairInfo(token.mintAddress),
         ]);
         if (!overview) return;
+
+        const lpBurned = await verifyLpBurnStatus(pairInfo);
 
         const rugScore = heuristicRugScore({
           liquidityUsd: overview.liquidityUsd,
           topHolderPct: mintSafety.topHolderPct,
           lpLocked: null, // "locked" (as opposed to burned) isn't verified — stays Unknown
           mintAuthorityRevoked: mintSafety.mintAuthorityRevoked,
+          buyCount24h: pairInfo?.buyCount24h,
+          sellCount24h: pairInfo?.sellCount24h,
         });
 
         await prisma.token.update({
@@ -114,6 +72,12 @@ export const syncWatchedTokens = inngest.createFunction(
             topHolderPct: mintSafety.topHolderPct,
             lpLocked: null,
             lpBurned,
+            poolCreatedAt: pairInfo?.poolCreatedAt ?? null,
+            buyCount24h: pairInfo?.buyCount24h ?? null,
+            sellCount24h: pairInfo?.sellCount24h ?? null,
+            twitterUrl: pairInfo?.twitterUrl ?? null,
+            telegramUrl: pairInfo?.telegramUrl ?? null,
+            websiteUrl: pairInfo?.websiteUrl ?? null,
           },
         });
       });
@@ -162,14 +126,15 @@ export const discoverTrendingTokens = inngest.createFunction(
       const result = (await step.run(`upsert-${t.mintAddress}`, async () => {
         const existing = await prisma.token.findUnique({ where: { mintAddress: t.mintAddress } });
 
-        // Enrich with real mint-safety and LP-burn reads so newly
-        // discovered tokens aren't stuck showing "Unknown" on every field
-        // until the next sync happens to cover them.
-        const [overview, mintSafety, lpBurned] = await Promise.all([
+        // Enrich with real mint-safety and pair data so newly discovered
+        // tokens aren't stuck showing "Unknown" on every field until the
+        // next sync happens to cover them.
+        const [overview, mintSafety, pairInfo] = await Promise.all([
           getTokenOverview(t.mintAddress),
           getMintSafety(t.mintAddress),
-          getVerifiedLpBurnStatus(t.mintAddress),
+          getPrimaryPairInfo(t.mintAddress),
         ]);
+        const lpBurned = await verifyLpBurnStatus(pairInfo);
 
         // The explicit blue-chip denylist (see lib/market-data.ts) catches
         // known majors up front, but Birdeye's trending list can also
@@ -186,6 +151,8 @@ export const discoverTrendingTokens = inngest.createFunction(
               topHolderPct: mintSafety.topHolderPct,
               lpLocked: null,
               mintAuthorityRevoked: mintSafety.mintAuthorityRevoked,
+              buyCount24h: pairInfo?.buyCount24h,
+              sellCount24h: pairInfo?.sellCount24h,
             })
           : null;
 
@@ -205,6 +172,12 @@ export const discoverTrendingTokens = inngest.createFunction(
           topHolderPct: mintSafety.topHolderPct,
           lpLocked: null,
           lpBurned,
+          poolCreatedAt: pairInfo?.poolCreatedAt ?? null,
+          buyCount24h: pairInfo?.buyCount24h ?? null,
+          sellCount24h: pairInfo?.sellCount24h ?? null,
+          twitterUrl: pairInfo?.twitterUrl ?? null,
+          telegramUrl: pairInfo?.telegramUrl ?? null,
+          websiteUrl: pairInfo?.websiteUrl ?? null,
         };
 
         const token = await prisma.token.upsert({
