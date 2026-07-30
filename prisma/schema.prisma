@@ -115,6 +115,23 @@ model Token {
   freezeAuthorityRevoked Boolean?
   topHolderPct    Float?   // % supply held by top 10 wallets
 
+  // Real on-chain pool creation time from Dexscreener's pair data — distinct
+  // from firstSeenAt below, which is only when *SolSight* discovered the
+  // token, not how old the pool actually is on-chain.
+  poolCreatedAt   DateTime?
+
+  // Real 24h buy/sell transaction counts from Dexscreener — a verifiable
+  // buy/sell-pressure signal, factored lightly into rugScore (see
+  // heuristicRugScore's doc comment for why this stays a soft signal).
+  buyCount24h     Int?
+  sellCount24h    Int?
+
+  // Verified social/website links, when the token's Dexscreener pair data
+  // includes them. Null rather than guessed/scraped when absent.
+  twitterUrl      String?
+  telegramUrl     String?
+  websiteUrl      String?
+
   firstSeenAt     DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
