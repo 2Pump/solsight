@@ -149,10 +149,10 @@ export const syncWatchedTokens = inngest.createFunction(
  */
 export const discoverTrendingTokens = inngest.createFunction(
   { id: "discover-trending-tokens", concurrency: 3 },
-  { cron: "*/30 * * * *" }, // every 30 minutes
+  { cron: "*/10 * * * *" }, // every 10 minutes
   async ({ step }) => {
     const trending = (await step.run("fetch-trending", () =>
-      getTrendingTokens(20)
+      getTrendingTokens(60)
     )) as Awaited<ReturnType<typeof getTrendingTokens>>;
 
     let discovered = 0;
