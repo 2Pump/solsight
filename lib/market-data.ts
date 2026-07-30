@@ -227,6 +227,13 @@ export async function getTokenOverview(mintAddress: string): Promise<TokenOvervi
 export interface PrimaryPairInfo {
   pairAddress: string;
   dexId: string;
+  /** Real on-chain pool creation time, or null if Dexscreener didn't report one. */
+  poolCreatedAt: Date | null;
+  buyCount24h: number | null;
+  sellCount24h: number | null;
+  twitterUrl: string | null;
+  telegramUrl: string | null;
+  websiteUrl: string | null;
 }
 
 /**
@@ -236,6 +243,11 @@ export interface PrimaryPairInfo {
  * getRaydiumPoolLpInfo below and lib/helius.ts's checkLpBurnStatus).
  * Dexscreener's official API doesn't expose lock/burn status itself, only
  * pair identity — the actual burn check happens separately.
+ *
+ * Also surfaces a few other real fields Dexscreener already returns in this
+ * same response (pool creation time, 24h buy/sell counts, social/website
+ * links) — pulled out here rather than in a second call, since fetching
+ * this response twice for the same token would be wasteful.
  */
 export async function getPrimaryPairInfo(mintAddress: string): Promise<PrimaryPairInfo | null> {
   const res = await fetch(`${DEXSCREENER_BASE}/latest/dex/tokens/${mintAddress}`, {
@@ -256,7 +268,20 @@ export async function getPrimaryPairInfo(mintAddress: string): Promise<PrimaryPa
   const top = sorted[0];
   if (!top?.pairAddress || !top?.dexId) return null;
 
-  return { pairAddress: String(top.pairAddress), dexId: String(top.dexId) };
+  const txns24h = (top.txns as { h24?: { buys?: number; sells?: number } } | undefined)?.h24;
+  const socials = (top.info as { socials?: Array<{ type: string; url: string }> } | undefined)?.socials ?? [];
+  const websites = (top.info as { websites?: Array<{ url: string }> } | undefined)?.websites ?? [];
+
+  return {
+    pairAddress: String(top.pairAddress),
+    dexId: String(top.dexId),
+    poolCreatedAt: typeof top.pairCreatedAt === "number" ? new Date(top.pairCreatedAt) : null,
+    buyCount24h: typeof txns24h?.buys === "number" ? txns24h.buys : null,
+    sellCount24h: typeof txns24h?.sells === "number" ? txns24h.sells : null,
+    twitterUrl: socials.find((s) => s.type === "twitter")?.url ?? null,
+    telegramUrl: socials.find((s) => s.type === "telegram")?.url ?? null,
+    websiteUrl: websites[0]?.url ?? null,
+  };
 }
 
 export interface RaydiumPoolLpInfo {
@@ -496,11 +521,26 @@ export function heuristicRugScore(input: {
   topHolderPct: number | null;
   lpLocked: boolean | null;
   mintAuthorityRevoked: boolean | null;
+  /** Real 24h counts from Dexscreener. Optional — older call sites that
+   *  don't have this data yet still work, just without this factor. */
+  buyCount24h?: number | null;
+  sellCount24h?: number | null;
 }): number {
   let score = 0;
   if (!input.lpLocked) score += 30;
   if (!input.mintAuthorityRevoked) score += 25;
   if ((input.liquidityUsd ?? 0) < 5000) score += 20;
   if ((input.topHolderPct ?? 0) > 40) score += 25;
+
+  // Severe sell-skew is a real, verifiable signal — but a deliberately soft
+  // one (+10, not +25 like the others). Heavy selling can mean holders
+  // dumping on a failing token, but it can just as easily mean profit-
+  // taking after a healthy pump — the same pattern, two very different
+  // situations this data alone can't distinguish. Only counted when there's
+  // enough volume for the ratio to be meaningful, not on a handful of txns.
+  const buys = input.buyCount24h ?? 0;
+  const sells = input.sellCount24h ?? 0;
+  if (buys + sells >= 20 && sells > buys * 2) score += 10;
+
   return Math.min(100, score);
 }
